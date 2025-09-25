@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 from torch import einsum, nn
 
 from ticl.models.decoders import MLPModelDecoder
-from ticl.models.mothernet import MLPModelPredictor
+from ticl.models.mothernet import ModelPredictor
 from ticl.models.encoders import Linear
 
 # helpers
@@ -24,7 +24,7 @@ def fourier_encode(x, max_freq, num_bands=4):
     x = x.unsqueeze(-1)
     device, dtype, orig_x = x.device, x.dtype, x
 
-    scales = torch.linspace(1., max_freq / 2, num_bands, device=device, dtype=dtype)
+    scales = torch.linspace(1.0, max_freq / 2, num_bands, device=device, dtype=dtype)
     scales = scales[(*((None,) * (len(x.shape) - 1)), Ellipsis)]
 
     x = x * scales * pi
@@ -44,7 +44,7 @@ class PreNorm(nn.Module):
         x = self.norm(x)
 
         if exists(self.norm_context):
-            context = kwargs['context']
+            context = kwargs["context"]
             normed_context = self.norm_context(context)
             kwargs.update(context=normed_context)
 
@@ -58,13 +58,13 @@ class GEGLU(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, mult=4, dropout=0.):
+    def __init__(self, dim, mult=4, dropout=0.0):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, dim * mult * 2),
             GEGLU(),
             nn.Linear(dim * mult, dim),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -72,12 +72,12 @@ class FeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
 
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
         self.heads = heads
 
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
@@ -93,26 +93,26 @@ class Attention(nn.Module):
         context = default(context, x)
         k, v = self.to_kv(context).chunk(2, dim=-1)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (q, k, v))
 
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        sim = einsum("b i d, b j d -> b i j", q, k) * self.scale
 
         if exists(mask):
-            mask = rearrange(mask, 'b ... -> b (...)')
+            mask = rearrange(mask, "b ... -> b (...)")
             max_neg_value = -torch.finfo(sim.dtype).max
-            mask = repeat(mask, 'b j -> (b h) () j', h=h)
+            mask = repeat(mask, "b j -> (b h) () j", h=h)
             sim.masked_fill_(~mask, max_neg_value)
 
         # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
         attn = self.dropout(attn)
 
-        out = einsum('b i j, b j d -> b i d', attn, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        out = einsum("b i j, b j d -> b i d", attn, v)
+        out = rearrange(out, "(b h) n d -> b n (h d)", h=h)
         return self.to_out(out)
 
 
-class TabPerceiver(MLPModelPredictor):
+class TabPerceiver(ModelPredictor):
     def __init__(
         self,
         *,
@@ -127,8 +127,8 @@ class TabPerceiver(MLPModelPredictor):
         cross_dim_head=64,
         latent_dim_head=64,
         n_out=10,
-        attn_dropout=0.,
-        dropout=0.,  # feed forward dropout
+        attn_dropout=0.0,
+        dropout=0.0,  # feed forward dropout
         self_per_cross_attn=1,
         decoder_hidden_size=512,
         predicted_hidden_layer_size=128,
@@ -147,9 +147,8 @@ class TabPerceiver(MLPModelPredictor):
         weight_embedding_rank=None,
         init_method=None,  # ignored
         tabpfn_zero_weights=None,  # ignored
-        decoder_activation='relu',
-        predicted_activation='relu',
-
+        decoder_activation="relu",
+        predicted_activation="relu",
     ):
         """The shape of the final attention mechanism will be:
         depth * (cross attention -> self_per_cross_attn * self attention)
@@ -198,35 +197,80 @@ class TabPerceiver(MLPModelPredictor):
 
             for block_ind in range(self_per_cross_attn):
                 latent_block = nn.Module()
-                latent_block.add_module('latent_attn', PreNorm(latent_dim, Attention(
-                    latent_dim, heads=latent_heads, dim_head=latent_dim_head, dropout=attn_dropout)))
-                latent_block.add_module('latent_ff', PreNorm(latent_dim, FeedForward(latent_dim, dropout=self.ff_dropout, mult=1)))
+                latent_block.add_module(
+                    "latent_attn",
+                    PreNorm(
+                        latent_dim,
+                        Attention(
+                            latent_dim,
+                            heads=latent_heads,
+                            dim_head=latent_dim_head,
+                            dropout=attn_dropout,
+                        ),
+                    ),
+                )
+                latent_block.add_module(
+                    "latent_ff",
+                    PreNorm(
+                        latent_dim,
+                        FeedForward(latent_dim, dropout=self.ff_dropout, mult=1),
+                    ),
+                )
                 self_attns.append(latent_block)
 
             cross_attn_layer = nn.Module()
-            cross_attn_layer.add_module('cross_attn', PreNorm(latent_dim, Attention(latent_dim, emsize, heads=cross_heads,
-                                        dim_head=cross_dim_head, dropout=attn_dropout), context_dim=emsize))
-            cross_attn_layer.add_module('cross_ff', PreNorm(latent_dim, FeedForward(latent_dim, dropout=self.ff_dropout, mult=1)))
-            cross_attn_layer.add_module('latents', self_attns)
+            cross_attn_layer.add_module(
+                "cross_attn",
+                PreNorm(
+                    latent_dim,
+                    Attention(
+                        latent_dim,
+                        emsize,
+                        heads=cross_heads,
+                        dim_head=cross_dim_head,
+                        dropout=attn_dropout,
+                    ),
+                    context_dim=emsize,
+                ),
+            )
+            cross_attn_layer.add_module(
+                "cross_ff",
+                PreNorm(
+                    latent_dim, FeedForward(latent_dim, dropout=self.ff_dropout, mult=1)
+                ),
+            )
+            cross_attn_layer.add_module("latents", self_attns)
             self.layers.append(cross_attn_layer)
-        self.decoder = MLPModelDecoder(emsize=latent_dim, hidden_size=decoder_hidden_size, n_out=n_out, decoder_type=decoder_type,
-                                       predicted_hidden_layer_size=predicted_hidden_layer_size, embed_dim=decoder_embed_dim,
-                                       decoder_hidden_layers=decoder_hidden_layers, nhead=latent_heads, predicted_hidden_layers=predicted_hidden_layers,
-                                       weight_embedding_rank=weight_embedding_rank, low_rank_weights=low_rank_weights, decoder_activation=decoder_activation,
-                                       in_size=n_features)
+        self.decoder = MLPModelDecoder(
+            emsize=latent_dim,
+            hidden_size=decoder_hidden_size,
+            n_out=n_out,
+            decoder_type=decoder_type,
+            predicted_hidden_layer_size=predicted_hidden_layer_size,
+            embed_dim=decoder_embed_dim,
+            decoder_hidden_layers=decoder_hidden_layers,
+            nhead=latent_heads,
+            predicted_hidden_layers=predicted_hidden_layers,
+            weight_embedding_rank=weight_embedding_rank,
+            low_rank_weights=low_rank_weights,
+            decoder_activation=decoder_activation,
+            in_size=n_features,
+        )
 
     def inner_forward(self, data):
         # b, *axis, _, device, dtype = *data.shape, data.device, data.dtype
         # assert len(axis) == self.input_axis, 'input data must have the right number of axis'
-        assert len(data.shape) == self.input_axis + 2, 'input data must have the right number of axis'
+        assert (
+            len(data.shape) == self.input_axis + 2
+        ), "input data must have the right number of axis"
         b = data.shape[1]
         # concat to channels of data and flatten axis
         # data = rearrange(data, 'b ... d -> b (...) d')
 
-        x = repeat(self.latents, 'n d -> b n d', b=b)
+        x = repeat(self.latents, "n d -> b n d", b=b)
 
         # attention is implemented with batch in first dimension
-        data = rearrange(data, 'n b d -> b n d')
+        data = rearrange(data, "n b d -> b n d")
 
         # layers
         for layer in self.layers:
@@ -237,5 +281,5 @@ class TabPerceiver(MLPModelPredictor):
                 x = latent.latent_attn(x) + x
                 x = latent.latent_ff(x) + x
 
-        x = rearrange(x, 'b n d -> n b d')
+        x = rearrange(x, "b n d -> n b d")
         return x
