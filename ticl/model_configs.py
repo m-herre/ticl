@@ -175,7 +175,8 @@ def get_mothernet_config():
         'predicted_hidden_layers': 2,
         'decoder_hidden_layers': 1,
         'decoder_hidden_size': 2048,
-        'decoder_activation': 'gelu'}
+        'decoder_activation': 'gelu',
+        'child_model': 'mlp'}
     }
 
 

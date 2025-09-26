@@ -50,6 +50,16 @@ class ModelPredictor(nn.Module):
             (b1, w1), *layers = self.decoder(output, y[:single_eval_pos])
 
             x_test_nona = torch.nan_to_num(x[single_eval_pos:], nan=0)
+
+            # DEBUG: Print tensor shapes for MLP case
+            # print(f"DEBUG MLP shapes:")
+            # print(f"  w1.shape: {w1.shape}")
+            # print(f"  b1.shape: {b1.shape}")
+            # print(f"  x_test_nona.shape: {x_test_nona.shape}")
+            # print(f"  decoder.in_size: {self.decoder.in_size}")
+            # print(f"  original x.shape: {x.shape}")
+            # print(f"  single_eval_pos: {single_eval_pos}")
+
             h = (x_test_nona.unsqueeze(-1) * w1.unsqueeze(0)).sum(2)
 
             if self.decoder.weight_embedding_rank is not None and len(layers):
@@ -78,25 +88,85 @@ class ModelPredictor(nn.Module):
             I, T, L = self.decoder(output, y[:single_eval_pos])
             x_test_nona = torch.nan_to_num(x[single_eval_pos:], nan=0)
 
+            # DEBUG: Print tensor shapes before the failing operation
+            # print(f"DEBUG GradTree shapes:")
+            # print(f"  I.shape: {I.shape}")
+            # print(f"  T.shape: {T.shape}")
+            # print(f"  L.shape: {L.shape}")
+            # print(f"  x_test_nona.shape: {x_test_nona.shape}")
+            # print(f"  x_test_nona.unsqueeze(1).shape: {x_test_nona.unsqueeze(1).shape}")
+            # print(f"  decoder.in_size: {self.decoder.in_size}")
+            # print(f"  original x.shape: {x.shape}")
+            # print(f"  single_eval_pos: {single_eval_pos}")
+
             # Inline GradTree forward pass
+            # I: [batch_size, n_nodes, n_features]
+            # x_test_nona: [n_test_samples, batch_size, n_features]
+            # We need to compute for each (test_sample, batch, node): I[batch, node, :] * x_test_nona[test_sample, batch, :]
+
+            # Reshape to align dimensions properly
+            # x_test_nona: [n_test_samples, batch_size, n_features] -> [n_test_samples, batch_size, 1, n_features]
+            x_test_expanded = x_test_nona.unsqueeze(2)  # [942, 8, 1, 100]
+            # I: [batch_size, n_nodes, n_features] -> [1, batch_size, n_nodes, n_features]
+            I_expanded = I.unsqueeze(0)  # [1, 8, 7, 100]
+
             chosen_features = torch.sum(
-                I * x_test_nona.unsqueeze(1), dim=-1
-            )  # [batch, n_nodes]
-            chosen_thresholds = torch.sum(I * T, dim=-1)  # [batch, n_nodes]
-            decisions = (chosen_features > chosen_thresholds).float()
+                I_expanded * x_test_expanded, dim=-1
+            )  # [n_test_samples, batch_size, n_nodes]
+
+            # T: [batch_size, n_nodes, n_features] - compute thresholds per batch
+            chosen_thresholds = torch.sum(I * T, dim=-1)  # [batch_size, n_nodes]
+            chosen_thresholds = chosen_thresholds.unsqueeze(
+                0
+            )  # [1, batch_size, n_nodes]
+
+            # Compare chosen features vs thresholds
+            decisions = (
+                chosen_features > chosen_thresholds
+            ).float()  # [n_test_samples, batch_size, n_nodes]
 
             n_leaves = L.shape[1]
+            n_test_samples = x_test_nona.shape[0]
+            batch_size = x_test_nona.shape[1]
             leaf_indices = torch.zeros(
-                x_test_nona.shape[0], dtype=torch.long, device=x.device
+                n_test_samples, batch_size, dtype=torch.long, device=x.device
             )
             depth = int(torch.log2(torch.tensor(n_leaves, device=x.device)).item())
 
             for d in range(depth):
                 node_offset = 2**d - 1
-                decision = decisions[:, node_offset + leaf_indices]
+                # decisions: [n_test_samples, batch_size, n_nodes]
+                # leaf_indices: [n_test_samples, batch_size]
+                # We need to index: decisions[test_idx, batch_idx, node_offset + leaf_indices[test_idx, batch_idx]]
+                node_indices = (
+                    node_offset + leaf_indices
+                )  # [n_test_samples, batch_size]
+
+                # Create indices for advanced indexing
+                test_idx = torch.arange(n_test_samples, device=x.device).unsqueeze(
+                    1
+                )  # [n_test_samples, 1]
+                batch_idx = torch.arange(batch_size, device=x.device).unsqueeze(
+                    0
+                )  # [1, batch_size]
+
+                decision = decisions[
+                    test_idx, batch_idx, node_indices
+                ]  # [n_test_samples, batch_size]
                 leaf_indices = 2 * leaf_indices + decision.long()
 
-            h = L[torch.arange(x_test_nona.shape[0]), leaf_indices]
+            # L: [batch_size, n_leaves, n_out]
+            # leaf_indices: [n_test_samples, batch_size]
+            # We need: L[batch_idx, leaf_indices[test_idx, batch_idx], :]
+            batch_idx = torch.arange(batch_size, device=x.device).unsqueeze(
+                0
+            )  # [1, batch_size]
+            test_idx = torch.arange(n_test_samples, device=x.device).unsqueeze(
+                1
+            )  # [n_test_samples, 1]
+
+            h = L[batch_idx, leaf_indices]  # [n_test_samples, batch_size, n_out]
+            # Keep the 3D structure - don't flatten!
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
 
