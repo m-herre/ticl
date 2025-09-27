@@ -623,17 +623,5 @@ class GradTreeDecoder(nn.Module):
             -1, self.n_leaves, self.n_out
         )
 
-        # Step 4: apply transforms
-        # I → feature index logits → entmax/softmax + straight-through hardmax
-        I_soft = F.softmax(I, dim=-1)  # you may swap in entmax here
-        I_hard = torch.zeros_like(I_soft)
-        I_hard.scatter_(-1, I_soft.argmax(dim=-1, keepdim=True), 1.0)
-        I = I_hard + I_soft - I_soft.detach()  # straight-through trick
-
-        # T → raw thresholds (can normalize here if you want to bound them)
-        # e.g., T = torch.tanh(T) for [-1,1] normalized space
-
-        # L → leaf distributions over classes
-        L = F.softmax(L, dim=-1)
-
+        # Step 4: return raw logits parameters
         return I, T, L
