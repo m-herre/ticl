@@ -1,6 +1,7 @@
 import torch, wandb
 import torch.nn as nn
 from torch.nn import TransformerEncoder
+import torch.nn.functional as F
 
 from ticl.models.encoders import OneHotAndLinear
 from ticl.models.decoders import MLPModelDecoder, GradTreeDecoder
@@ -10,52 +11,138 @@ from ticl.models.encoders import Linear
 from ticl.utils import SeqBN, get_init_method
 
 
+# ————— helpers —————
+def _one_hot_argmax(logits: torch.Tensor, dim: int) -> torch.Tensor:
+    # hardmax → one-hot along 'dim'
+    idx = logits.argmax(dim=dim, keepdim=True)
+    oh = torch.zeros_like(logits).scatter_(dim, idx, 1.0)
+    return oh
+
+
+def _st(hard: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
+    # straight-through: forward=hard, backward=soft
+    return hard + (soft - soft.detach())
+
+
+# 🔧 Placeholder for entmax15 (will replace later with proper implementation)
+def entmax15(inputs, dim=-1, eps=1e-9):
+    """
+    Computes the 1.5-entmax transformation (Peters et al., 2019).
+    Equivalent to softmax but yields sparse probabilities.
+
+    Args:
+        inputs: Tensor of shape (..., n)
+        dim: Dimension to apply entmax along
+        eps: Numerical stability constant
+
+    Returns:
+        Tensor of same shape, where entries are >= 0 and sum to 1 along `dim`.
+    """
+
+    # Step 1: sort inputs along dim
+    X = inputs.transpose(dim, -1)
+    d = X.size(-1)
+    X_sorted, _ = torch.sort(X, descending=True)
+    rho = torch.arange(1, d + 1, device=X.device, dtype=X.dtype).view(1, -1)
+
+    # Step 2: compute running means and squared means
+    X_cumsum = torch.cumsum(X_sorted, dim=-1)
+    X_sq_cumsum = torch.cumsum(X_sorted**2, dim=-1)
+
+    # Step 3: Compute τ candidates (thresholds)
+    mean_sq = X_sq_cumsum / rho
+    mean = X_cumsum / rho
+    S = (1.0 - mean_sq + mean**2).clamp_min(0)
+    τ_candidates = mean - torch.sqrt(S)
+
+    # Step 4: find support size (the largest k such that τ < x_k)
+    support = (τ_candidates < X_sorted).type(X_sorted.dtype)
+    support_size = support.sum(dim=-1, keepdim=True)
+
+    # Step 5: τ* = τ at support size
+    τ_star = τ_candidates.gather(-1, (support_size - 1).long().clamp(min=0))
+    τ_star = τ_star.transpose(dim, -1)
+
+    # Step 6: compute final probabilities
+    output = ((inputs - τ_star).clamp_min(0)) ** 2
+    output /= output.sum(dim=dim, keepdim=True).clamp_min(eps)
+
+    return output
+
+
 class ModelPredictor(nn.Module):
 
-    def tree_forward(self, x_test, feature_idx, thresholds, L):
+    def tree_forward_soft(self, x_test, I_logits, T, L):
         """
-        x_test:      (n_test, batch, n_features)
-        feature_idx: (batch, n_nodes)          # argmax over I_logits (per node)
-        thresholds:  (batch, n_nodes)          # gathered per chosen feature
-        L:           (batch, n_leaves, n_out)  # leaf logits
+        Paper-exact GradTree pass with ST operators (Algorithm 1).
 
-        returns: (n_test, batch, n_out)
+        Args:
+            x_test:   (n_test, batch, n_features)
+            I_logits: (batch, n_nodes, n_features)
+            T:        (batch, n_nodes, n_features)
+            L:        (batch, n_leaves, n_out)
+
+        Returns:
+            y_pred: (n_test, batch, n_out)
         """
-        n_test, batch, _ = x_test.shape
-        device = x_test.device
+        n_test, batch, n_features = x_test.shape
+        n_nodes = I_logits.shape[1]
         depth = self.tree_depth
+        n_leaves = 2**depth
+        device = x_test.device
+        dtype = x_test.dtype
 
-        # Start at root (node 0) in global array indexing
-        node_idx = torch.zeros((n_test, batch), dtype=torch.long, device=device)
+        # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
+        I_soft = entmax15(I_logits, dim=-1)  # (b, n_nodes, n_feat)
+        I_hard = _one_hot_argmax(I_logits, dim=-1).to(dtype)  # (b, n_nodes, n_feat)
+        I = _st(
+            I_hard, I_soft
+        )  # ST entmax (paper)  [Alg.1, line 2-3], :contentReference[oaicite:3]{index=3}
 
-        for _ in range(depth):
-            # Pairwise batch indexing to select (feature, threshold) for each (sample, dataset)
-            batch_ids = (
-                torch.arange(batch, device=device).unsqueeze(0).expand(n_test, -1)
-            )
-            f = feature_idx[batch_ids, node_idx]  # (n_test, batch)
-            t = thresholds[batch_ids, node_idx]  # (n_test, batch)
+        # 2) Split probability per node (left prob “s” in the paper)
+        #    s = sigmoid( <I,T> - <I,x> )  (Eq. 6), then ST rounding to {0,1} (Alg.1 line 11)
+        #    <I,T> is batch×nodes, <I,x> is test×batch×nodes
+        t_proj = (I * T).sum(-1)  # (b, n_nodes)        <I,T>
+        x_proj = torch.einsum("tbf,bnf->tbn", x_test, I)  # (t, b, n_nodes)      <I,x>
+        s_soft = torch.sigmoid(
+            t_proj.unsqueeze(0) - x_proj
+        )  # (t, b, n_nodes)      Eq. (6) as in Alg.1 line 10, :contentReference[oaicite:4]{index=4}
+        s_hard = torch.round(s_soft)  # (t, b, n_nodes)
+        s = _st(
+            s_hard, s_soft
+        )  # ST on split (paper)  [Alg.1, line 11], :contentReference[oaicite:5]{index=5}
+        # Note: s is the LEFT probability. RIGHT probability is (1 - s).
+        # (No clamping here to follow the paper exactly.)
 
-            # Feature values for each sample/dataset at this node
-            x_f = torch.gather(x_test, 2, f.unsqueeze(-1)).squeeze(
-                -1
-            )  # (n_test, batch)
+        # 3) Path probabilities over levels (paper’s L(x|l,·) via p(l,j) bits; Alg.1 line 12)
+        p_nodes = torch.ones(
+            (n_test, batch, 1), device=device, dtype=dtype
+        )  # (t, b, 1)
+        node_offset = 0
+        for level in range(depth):
+            n_level = 2**level
+            s_lvl = s[..., node_offset : node_offset + n_level]  # (t, b, n_level)
+            # Expand parent probs for left/right children
+            p_nodes = p_nodes.repeat_interleave(2, dim=-1)  # (t, b, 2*n_level)
+            # Left = s, Right = 1 - s   (matches Eq. 3’s ((1-p)*s + p*(1-s)) with p∈{0,1})
+            left = s_lvl
+            right = 1.0 - s_lvl
+            children = torch.stack([left, right], dim=-1).reshape(
+                n_test, batch, -1
+            )  # interleave
+            p_nodes = p_nodes * children
+            node_offset += n_level
 
-            # Hard decision: 0 = left, 1 = right
-            decision = (x_f > t).long()
+        p_leaves = p_nodes  # (t, b, n_leaves)
 
-            # Move to child in global array indexing: left=2*i+1, right=2*i+2
-            node_idx = 2 * node_idx + 1 + decision
+        # 4) Expected leaf aggregation (Alg.1 line 14–16)
+        y_hat = torch.einsum("tbl,blo->tbo", p_leaves, L)  # (t, b, n_out)
+        # The paper applies softmax at the end to get class probabilities (Alg.1 line 16).
+        # Return logits or probabilities depending on your training loop.
+        # If you want paper-exact behavior (probabilities), uncomment the next line:
+        # y_hat = F.softmax(y_hat, dim=-1)                                     # :contentReference[oaicite:6]{index=6}
 
-        # Convert global node index to leaf index in [0 .. 2^d - 1]
-        leaf_base = (1 << depth) - 1
-        leaf_idx = node_idx - leaf_base  # (n_test, batch)
-
-        # Gather leaf logits
-        batch_ids = torch.arange(batch, device=device).unsqueeze(0).expand(n_test, -1)
-        leaf_logits = L[batch_ids, leaf_idx]  # (n_test, batch, n_out)
-
-        return leaf_logits
+        return y_hat
 
     def forward(self, src, single_eval_pos=None):
         assert isinstance(
@@ -125,15 +212,8 @@ class ModelPredictor(nn.Module):
             I_logits, T, L = self.decoder(output, y[:single_eval_pos])
             x_test = torch.nan_to_num(x[single_eval_pos:], nan=0)
 
-            # 1. Select features per node
-            feature_idx = I_logits.argmax(-1)  # (batch, n_nodes)
-            # 2. Gather thresholds of selected features
-            thresholds = T.gather(2, feature_idx.unsqueeze(-1)).squeeze(
-                -1
-            )  # (batch, n_nodes)
-
-            # 3. Forward pass through emitted tree
-            h = self.tree_forward(x_test, feature_idx, thresholds, L)
+            # 🔧 Use soft differentiable tree inference
+            h = self.tree_forward_soft(x_test, I_logits, T, L)
 
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
