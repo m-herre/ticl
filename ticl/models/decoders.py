@@ -391,6 +391,9 @@ class SummaryLayer(nn.Module):
                 counts.scatter_add_(0, indices, ones)
                 counts = counts.clamp(1e-10)  # don't divide by zero
                 res = (sums / counts.unsqueeze(-1)).transpose(0, 1)
+                # Flatten the last dimensions to match expected output size
+                if res.ndim == 3:
+                    res = res.reshape(res.shape[0], -1)
             elif self.decoder_type == "average":
                 res = x.mean(0)
             else:
@@ -564,18 +567,22 @@ class GradTreeDecoder(nn.Module):
         decoder_type="output_attention",
         embed_dim=2048,
         decoder_hidden_layers=1,
+        nhead=4,
         decoder_activation="relu",
         in_size=100,
         tree_depth=3,
     ):
         super().__init__()
         self.emsize = emsize
-        self.embed_dim = embed_dim
-        self.n_out = n_out  # number of classes
         self.hidden_size = hidden_size
+        self.n_out = n_out
         self.decoder_type = decoder_type
-        self.in_size = in_size  # number of features
+        self.embed_dim = embed_dim
+        self.decoder_hidden_layers = decoder_hidden_layers
+        self.nhead = nhead
+        self.in_size = in_size
         self.tree_depth = tree_depth
+        self.activation = decoder_activation
 
         # number of internal nodes and leaves
         self.n_nodes = 2**tree_depth - 1
@@ -588,7 +595,11 @@ class GradTreeDecoder(nn.Module):
 
         # summary layer = dataset embedding (you already have this in your codebase)
         self.summary_layer = SummaryLayer(
-            emsize=emsize, n_out=n_out, decoder_type=decoder_type, embed_dim=embed_dim
+            emsize=emsize,
+            n_out=n_out,
+            decoder_type=decoder_type,
+            embed_dim=embed_dim,
+            nhead=nhead,
         )
 
         # projection MLP to map summary embedding → φ
@@ -602,25 +613,39 @@ class GradTreeDecoder(nn.Module):
         )
 
     def forward(self, x, y_src):
-        # x: [samples, batch, emsize]  (transformer embeddings)
-        # y_src: class labels for training samples
-        # Step 1: summarize per-sample embeddings into per-dataset embedding
-        x_summary = self.summary_layer(x, y_src).reshape(x.shape[1], -1)
+        """
+        Args:
+            x: transformer output (n_samples x batch x emsize)
+            y_src: labels for training portion
+        Returns:
+            Tuple (I_logits, T, L)
+        """
+        # Dataset-level summary
+        x_summary = self.summary_layer(x, y_src)  # (batch, summary_dim)
+        res = self.mlp(x_summary)  # (batch, total_num_params)
 
-        # Step 2: project into flat vector φ
-        res = self.mlp(x_summary)
-        assert res.shape[-1] == self.num_output_layer_weights
+        # Sequentially unpack res into tensors
+        batch_size = res.shape[0]
+        offset = 0
 
-        # Step 3: reshape into GradTree parameter tensors
-        I = res[:, : self.n_nodes * self.in_size].reshape(
-            -1, self.n_nodes, self.in_size
-        )
-        T = res[
-            :, self.n_nodes * self.in_size : 2 * self.n_nodes * self.in_size
-        ].reshape(-1, self.n_nodes, self.in_size)
-        L = res[:, 2 * self.n_nodes * self.in_size :].reshape(
-            -1, self.n_leaves, self.n_out
-        )
+        # Feature-selection logits (n_nodes x n_features)
+        I_logits_size = self.n_nodes * self.in_size
+        I_logits = res[:, offset : offset + I_logits_size]
+        I_logits = I_logits.view(batch_size, self.n_nodes, self.in_size)
+        offset += I_logits_size
 
-        # Step 4: return raw logits parameters
-        return I, T, L
+        # Thresholds (n_nodes x n_features)
+        T_size = self.n_nodes * self.in_size
+        T = res[:, offset : offset + T_size]
+        T = T.view(batch_size, self.n_nodes, self.in_size)
+        offset += T_size
+
+        # Leaf logits (n_leaves x n_out)
+        L_size = self.n_leaves * self.n_out
+        L = res[:, offset : offset + L_size]
+        L = L.view(batch_size, self.n_leaves, self.n_out)
+        offset += L_size
+
+        assert offset == res.shape[1], "Mismatch in decoder output unpacking."
+
+        return I_logits, T, L
