@@ -612,6 +612,36 @@ class GradTreeDecoder(nn.Module):
             activation=decoder_activation,
         )
 
+        path_identifier_list = []
+        internal_node_index_list = []
+        for leaf_index in range(self.n_leaves):
+            for current_depth in range(1, tree_depth + 1):
+                path_identifier = (
+                    leaf_index // (2 ** (tree_depth - current_depth))
+                ) % 2
+                internal_node_index = (
+                    (2 ** (current_depth - 1))
+                    + (leaf_index // 2 ** (tree_depth - (current_depth - 1)))
+                    - 1
+                )
+                path_identifier_list.append(path_identifier)
+                internal_node_index_list.append(internal_node_index)
+
+        self.path_identifier_list = nn.Parameter(
+            torch.tensor(
+                np.reshape(np.array(path_identifier_list), (-1, self.tree_depth)),
+                dtype=torch.int64,
+            ),
+            requires_grad=False,
+        )
+        self.internal_node_index_list = nn.Parameter(
+            torch.tensor(
+                np.reshape(np.array(internal_node_index_list), (-1, self.tree_depth)),
+                dtype=torch.int64,
+            ),
+            requires_grad=False,
+        )
+
     def forward(self, x, y_src):
         """
         Args:
