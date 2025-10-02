@@ -12,14 +12,14 @@ from ticl.utils import SeqBN, get_init_method
 
 
 # ————— helpers —————
-def _one_hot_argmax(logits: torch.Tensor, dim: int) -> torch.Tensor:
+def one_hot_argmax(logits: torch.Tensor, dim: int) -> torch.Tensor:
     # hardmax → one-hot along 'dim'
     idx = logits.argmax(dim=dim, keepdim=True)
     oh = torch.zeros_like(logits).scatter_(dim, idx, 1.0)
     return oh
 
 
-def _st(hard: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
+def st(hard: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
     # straight-through: forward=hard, backward=soft
     return hard + (soft - soft.detach())
 
@@ -92,12 +92,26 @@ class ModelPredictor(nn.Module):
         device = x_test.device
         dtype = x_test.dtype
 
+        def stat(name, t):
+            n_nan = torch.isnan(t).sum().item()
+            # print(
+            #     f"[DEBUG] {name}: shape={tuple(t.shape)}, "
+            #     f"mean={t.mean().item():.4e}, std={t.std().item():.4e}, "
+            #     f"min={t.min().item():.4e}, max={t.max().item():.4e}, "
+            #     f"NaNs={n_nan}",
+            #     flush=True,
+            # )
+
         # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
         I_soft = entmax15(I_logits, dim=-1)  # (b, n_nodes, n_feat)
-        I_hard = _one_hot_argmax(I_logits, dim=-1).to(dtype)  # (b, n_nodes, n_feat)
-        I = _st(
+        I_hard = one_hot_argmax(I_logits, dim=-1).to(dtype)  # (b, n_nodes, n_feat)
+        I = st(
             I_hard, I_soft
         )  # ST entmax (paper)  [Alg.1, line 2-3], :contentReference[oaicite:3]{index=3}
+        stat("I_logits", I_logits)
+        stat("I_soft (entmax)", I_soft)
+        stat("I_hard", I_hard)
+        stat("I (ST)", I)
 
         # 2) Split probability per node (left prob “s” in the paper)
         #    s = sigmoid( <I,T> - <I,x> )  (Eq. 6), then ST rounding to {0,1} (Alg.1 line 11)
@@ -108,11 +122,22 @@ class ModelPredictor(nn.Module):
             t_proj.unsqueeze(0) - x_proj
         )  # (t, b, n_nodes)      Eq. (6) as in Alg.1 line 10, :contentReference[oaicite:4]{index=4}
         s_hard = torch.round(s_soft)  # (t, b, n_nodes)
-        s = _st(
+        s = st(
             s_hard, s_soft
         )  # ST on split (paper)  [Alg.1, line 11], :contentReference[oaicite:5]{index=5}
         # Note: s is the LEFT probability. RIGHT probability is (1 - s).
         # (No clamping here to follow the paper exactly.)
+        stat("T", T)
+        stat("t_proj", t_proj)
+        stat("x_proj", x_proj)
+        diff = t_proj.unsqueeze(0) - x_proj
+        stat("diff (t_proj - x_proj)", diff)
+        stat("s_soft (sigmoid)", s_soft)
+        stat("s_hard", s_hard)
+        stat("s (ST split prob)", s)
+
+        if torch.isnan(s).any():
+            print("⚠️ NaN detected in split probabilities! Check T / x_proj magnitudes.")
 
         # 3) Path probabilities over levels (paper’s L(x|l,·) via p(l,j) bits; Alg.1 line 12)
         p_nodes = torch.ones(
@@ -132,6 +157,7 @@ class ModelPredictor(nn.Module):
             )  # interleave
             p_nodes = p_nodes * children
             node_offset += n_level
+            stat(f"p_nodes (level {level})", p_nodes)
 
         p_leaves = p_nodes  # (t, b, n_leaves)
 
@@ -141,6 +167,15 @@ class ModelPredictor(nn.Module):
         # Return logits or probabilities depending on your training loop.
         # If you want paper-exact behavior (probabilities), uncomment the next line:
         # y_hat = F.softmax(y_hat, dim=-1)                                     # :contentReference[oaicite:6]{index=6}
+
+        stat("L (leaf logits)", L)
+        stat("y_hat (output logits)", y_hat)
+
+        if torch.isnan(y_hat).any():
+            print("❌ NaN detected in final output logits!")
+            print(
+                "=> Check for exploding values in t_proj/x_proj or invalid entmax output."
+            )
 
         return y_hat
 
