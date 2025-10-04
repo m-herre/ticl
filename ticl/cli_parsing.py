@@ -339,6 +339,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
             type=str,
             help="Child model type to generate parameters for (mlp or gradtree)",
         )
+        mothernet.add_argument(
+            "--tree-depth",
+            type=int,
+            help="Depth of the GradTree tree (only used when child-model is gradtree)",
+        )
         mothernet.set_defaults(**config["mothernet"])
 
     if model_type in ["additive", "baam"]:

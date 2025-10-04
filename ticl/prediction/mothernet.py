@@ -6,12 +6,19 @@ import torch
 from einops import rearrange, repeat
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 
-from sklearn.preprocessing import LabelEncoder, StandardScaler, OneHotEncoder, QuantileTransformer
+from sklearn.preprocessing import (
+    LabelEncoder,
+    StandardScaler,
+    OneHotEncoder,
+    QuantileTransformer,
+)
 from sklearn.feature_selection import SelectKBest
 
 from ticl.model_builder import load_model
 from ticl.utils import normalize_by_used_features_f, normalize_data, fetch_model
 from ticl.evaluation.baselines.torch_mlp import TorchMLP, NeuralNetwork
+
+from ticl.models.mothernet import entmax15, one_hot_argmax
 
 
 def extract_linear_model(model, X_train, y_train, device="cpu"):
@@ -25,9 +32,14 @@ def extract_linear_model(model, X_train, y_train, device="cpu"):
 
     eval_xs_ = normalize_data(xs, eval_position)
 
-    eval_xs = normalize_by_used_features_f(
-        eval_xs_, X_train.shape[-1], max_features)
-    x_all_torch = torch.concat([eval_xs, torch.zeros((X_train.shape[0], 100 - X_train.shape[1]), device=device)], axis=1)
+    eval_xs = normalize_by_used_features_f(eval_xs_, X_train.shape[-1], max_features)
+    x_all_torch = torch.concat(
+        [
+            eval_xs,
+            torch.zeros((X_train.shape[0], 100 - X_train.shape[1]), device=device),
+        ],
+        axis=1,
+    )
 
     x_src = model.encoder(x_all_torch.unsqueeze(1))
     y_src = model.y_encoder(ys.unsqueeze(1).unsqueeze(-1))
@@ -37,16 +49,26 @@ def extract_linear_model(model, X_train, y_train, device="cpu"):
     encoder_weight = model.encoder.get_parameter("weight")
     encoder_bias = model.encoder.get_parameter("bias")
 
-    total_weights = torch.matmul(encoder_weight[:, :n_features].T, linear_model_coefs[0, :-1, :n_classes])
-    total_biases = torch.matmul(encoder_bias, linear_model_coefs[0, :-1, :n_classes]) + linear_model_coefs[0, -1, :n_classes]
-    return total_weights.detach().cpu().numpy() / (n_features / max_features), total_biases.detach().cpu().numpy()
+    total_weights = torch.matmul(
+        encoder_weight[:, :n_features].T, linear_model_coefs[0, :-1, :n_classes]
+    )
+    total_biases = (
+        torch.matmul(encoder_bias, linear_model_coefs[0, :-1, :n_classes])
+        + linear_model_coefs[0, -1, :n_classes]
+    )
+    return (
+        total_weights.detach().cpu().numpy() / (n_features / max_features),
+        total_biases.detach().cpu().numpy(),
+    )
 
 
-def extract_mlp_model(model, config, X_train, y_train, device="cpu", inference_device="cpu", scale=True):
+def extract_mlp_model(
+    model, config, X_train, y_train, device="cpu", inference_device="cpu", scale=True
+):
     if "cuda" in inference_device and device == "cpu":
         raise ValueError("Cannot run inference on cuda when model is on cpu")
     try:
-        max_features = config['prior']['num_features']
+        max_features = config["prior"]["num_features"]
     except KeyError:
         max_features = 100
     eval_position = X_train.shape[0]
@@ -66,11 +88,20 @@ def extract_mlp_model(model, config, X_train, y_train, device="cpu", inference_d
     else:
         eval_xs_ = torch.clip(xs, min=-100, max=100)
 
-    eval_xs = normalize_by_used_features_f(
-        eval_xs_, X_train.shape[-1], max_features)
+    eval_xs = normalize_by_used_features_f(eval_xs_, X_train.shape[-1], max_features)
     if X_train.shape[1] > max_features:
-        raise ValueError(f"Cannot run inference on data with more than {max_features} features")
-    x_all_torch = torch.concat([eval_xs, torch.zeros((X_train.shape[0], max_features - X_train.shape[1]), device=device)], axis=1)
+        raise ValueError(
+            f"Cannot run inference on data with more than {max_features} features"
+        )
+    x_all_torch = torch.concat(
+        [
+            eval_xs,
+            torch.zeros(
+                (X_train.shape[0], max_features - X_train.shape[1]), device=device
+            ),
+        ],
+        axis=1,
+    )
     x_src = model.encoder(x_all_torch.unsqueeze(1))
 
     if model.y_encoder is not None:
@@ -87,8 +118,8 @@ def extract_mlp_model(model, config, X_train, y_train, device="cpu", inference_d
         output = model.linear_attention(train_x)
     else:
         # perceiver
-        data = rearrange(train_x, 'n b d -> b n d')
-        x = repeat(model.latents, 'n d -> b n d', b=data.shape[0])
+        data = rearrange(train_x, "n b d -> b n d")
+        x = repeat(model.latents, "n d -> b n d", b=data.shape[0])
 
         # layers
         for cross_attn, cross_ff, self_attns in model.layers:
@@ -99,7 +130,7 @@ def extract_mlp_model(model, config, X_train, y_train, device="cpu", inference_d
                 x = self_attn(x) + x
                 x = self_ff(x) + x
 
-        output = rearrange(x, 'b n d -> n b d')
+        output = rearrange(x, "b n d -> n b d")
     (b1, w1), *layers = model.decoder(output, ys)
 
     w1_data_space_prenorm = w1.squeeze()[:n_features, :]
@@ -119,33 +150,151 @@ def extract_mlp_model(model, config, X_train, y_train, device="cpu", inference_d
 
     # remove extra classes on output layer
     if len(layers):
-        layers_result.append((layers[-1][0].squeeze()[:n_classes], layers[-1][1].squeeze()[:, :n_classes]))
+        layers_result.append(
+            (
+                layers[-1][0].squeeze()[:n_classes],
+                layers[-1][1].squeeze()[:, :n_classes],
+            )
+        )
     else:
         layers_result = [(b1_data_space[:n_classes], w1_data_space[:, :n_classes])]
 
     if inference_device == "cpu":
+
         def detach(x):
             return x.detach().cpu().numpy()
+
     else:
+
         def detach(x):
             return x.detach()
 
     return [(detach(b), detach(w)) for (b, w) in layers_result]
 
 
+def extract_gradtree_model(
+    model, config, X_train, y_train, device="cpu", inference_device="cpu", scale=True
+):
+    """
+    Extract GradTree parameters from a trained MotherNet model.
+
+    Returns:
+        I_logits: Feature selection logits (n_nodes, n_features)
+        T: Thresholds (n_nodes, n_features)
+        L: Leaf logits (n_leaves, n_out)
+        max_features: For normalization
+        tree_depth: Tree depth parameter
+    """
+
+    if "cuda" in inference_device and device == "cpu":
+        raise ValueError("Cannot run inference on cuda when model is on cpu")
+    try:
+        max_features = config["prior"]["num_features"]
+    except KeyError:
+        max_features = 100
+    eval_position = X_train.shape[0]
+    n_classes = len(np.unique(y_train))
+    n_features = X_train.shape[1]
+    if torch.is_tensor(X_train):
+        xs = X_train.to(device)
+    else:
+        xs = torch.Tensor(X_train.astype(float)).to(device)
+    if torch.is_tensor(y_train):
+        ys = y_train.to(device)
+    else:
+        ys = torch.Tensor(y_train.astype(float)).to(device)
+
+    if scale:
+        eval_xs_ = normalize_data(xs, eval_position)
+    else:
+        eval_xs_ = torch.clip(xs, min=-100, max=100)
+
+    eval_xs = normalize_by_used_features_f(eval_xs_, X_train.shape[-1], max_features)
+    if X_train.shape[1] > max_features:
+        raise ValueError(
+            f"Cannot run inference on data with more than {max_features} features"
+        )
+    x_all_torch = torch.concat(
+        [
+            eval_xs,
+            torch.zeros(
+                (X_train.shape[0], max_features - X_train.shape[1]), device=device
+            ),
+        ],
+        axis=1,
+    )
+    x_src = model.encoder(x_all_torch.unsqueeze(1))
+
+    if model.y_encoder is not None:
+        y_src = model.y_encoder(ys.unsqueeze(1).unsqueeze(-1))
+        train_x = x_src + y_src
+    else:
+        train_x = x_src
+
+    if hasattr(model, "transformer_encoder"):
+        # tabpfn mlp model maker
+        output = model.transformer_encoder(train_x)
+    elif hasattr(model, "linear_attention"):
+        # linear_attention model maker
+        output = model.linear_attention(train_x)
+    else:
+        # perceiver
+        data = rearrange(train_x, "n b d -> b n d")
+        x = repeat(model.latents, "n d -> b n d", b=data.shape[0])
+
+        # layers
+        for cross_attn, cross_ff, self_attns in model.layers:
+            x = cross_attn(x, context=data) + x
+            x = cross_ff(x) + x
+
+            for self_attn, self_ff in self_attns:
+                x = self_attn(x) + x
+                x = self_ff(x) + x
+
+        output = rearrange(x, "b n d -> n b d")
+
+    I_logits, T, L = model.decoder(output, ys)
+    path_identifier_list = model.decoder.path_identifier_list
+    internal_node_index_list = model.decoder.internal_node_index_list
+
+    # Handle device conversion (same logic as MLP case)
+    if inference_device == "cpu":
+
+        def detach(x):
+            return x.detach().cpu().numpy()
+
+    else:
+
+        def detach(x):
+            return x.detach()
+
+    # Return as dictionary (expected by predict_with_gradtree_model)
+    return {
+        "I_logits": detach(I_logits),
+        "T": detach(T),
+        "L": detach(L),
+        "path_identifier_list": detach(path_identifier_list),
+        "internal_node_index_list": detach(internal_node_index_list),
+    }
+
+
 def predict_with_linear_model(X_train, X_test, weights, biases):
     mean = X_train.mean(axis=0)
-    std = X_train.std(axis=0, ddof=1) + .000001
+    std = X_train.std(axis=0, ddof=1) + 0.000001
     X_test_scaled = (X_test - mean) / std
     X_test_scaled = np.clip(X_test_scaled, a_min=-100, a_max=100)
     res2 = np.dot(X_test_scaled, weights) + biases
     from scipy.special import softmax
-    return softmax(res2 / .8, axis=1)
+
+    return softmax(res2 / 0.8, axis=1)
 
 
 class ForwardLinearModel(ClassifierMixin, BaseEstimator):
     def __init__(self, path=None, device="cpu"):
-        self.path = path or "models_diff/prior_diff_real_checkpoint_predict_linear_coefficients_nlayer_6_multiclass_04_11_2023_01_26_19_n_0_epoch_94.cpkt"
+        self.path = (
+            path
+            or "models_diff/prior_diff_real_checkpoint_predict_linear_coefficients_nlayer_6_multiclass_04_11_2023_01_26_19_n_0_epoch_94.cpkt"
+        )
         self.device = device
 
     def fit(self, X, y):
@@ -167,7 +316,15 @@ class ForwardLinearModel(ClassifierMixin, BaseEstimator):
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
 
-def predict_with_mlp_model(train_mean, train_std, X_test, layers, scale=True, inference_device="cpu", config=None):
+def predict_with_mlp_model(
+    train_mean,
+    train_std,
+    X_test,
+    layers,
+    scale=True,
+    inference_device="cpu",
+    config=None,
+):
     if inference_device == "cpu":
         X_test = np.array(X_test, dtype=float)
         # FIXME replacing nan with 0 as in TabPFN
@@ -181,18 +338,22 @@ def predict_with_mlp_model(train_mean, train_std, X_test, layers, scale=True, in
             out = np.dot(out, w) + b
             if i != len(layers) - 1:
                 try:
-                    activation = config['mothernet']['predicted_activation']
+                    activation = config["mothernet"]["predicted_activation"]
                 except (KeyError, TypeError):
                     activation = "relu"
                 if activation != "relu":
-                    raise ValueError(f"Only ReLU activation supported, got {activation}")
+                    raise ValueError(
+                        f"Only ReLU activation supported, got {activation}"
+                    )
                 out = np.maximum(out, 0)
         if np.isnan(out).any():
             print("NAN")
             import pdb
+
             pdb.set_trace()
         from scipy.special import softmax
-        return softmax(out / .8, axis=1)
+
+        return softmax(out / 0.8, axis=1)
     elif "cuda" in inference_device:
         mean = torch.Tensor(train_mean).to(inference_device)
         std = torch.Tensor(train_std).to(inference_device)
@@ -207,13 +368,175 @@ def predict_with_mlp_model(train_mean, train_std, X_test, layers, scale=True, in
             out = torch.matmul(out, w) + b
             if i != len(layers) - 1:
                 out = torch.relu(out)
-        return torch.nn.functional.softmax(out / .8, dim=1).cpu().numpy()
+        return torch.nn.functional.softmax(out / 0.8, dim=1).cpu().numpy()
+    else:
+        raise ValueError(f"Unknown inference_device: {inference_device}")
+
+
+def predict_with_gradtree_model(
+    train_mean,
+    train_std,
+    X_test,
+    tree_params,
+    scale=True,
+    inference_device="cpu",
+    config=None,
+    n_classes=None,
+):
+    """
+    Inference for MotherNet+GradTree models.
+    """
+    # ---------- unpack & squeeze batch axis if present ----------
+    I_logits = tree_params["I_logits"]
+    T = tree_params["T"]
+    L = tree_params["L"]
+    path_ids = tree_params["path_identifier_list"]
+    node_idx = tree_params["internal_node_index_list"]
+
+    # If the decoder emitted a batch dimension (e.g. ensembles), take the first one for deterministic inference
+    if I_logits.ndim == 3:
+        I_logits = I_logits[0]
+    if T.ndim == 3:
+        T = T[0]
+    if L.ndim == 3:
+        L = L[0]
+
+    # shapes
+    n_nodes, n_features = I_logits.shape
+    n_leaves, n_out = L.shape
+    depth = path_ids.shape[1]
+
+    # ---------- preprocess test features ----------
+    if inference_device == "cpu":
+        X = np.array(X_test, dtype=float)
+        X = np.nan_to_num(X, 0)
+        if scale:
+            X = (X - train_mean) / train_std
+        X = np.clip(X, -100, 100)  # (n_samples, n_features)
+
+        # ---------- (1) hard feature selection per node: I ∈ {0,1}^{n_nodes × n_features} ----------
+        # argmax over features per node
+        feat_argmax = I_logits.argmax(axis=-1)  # (n_nodes,)
+        I = np.zeros_like(I_logits, dtype=X.dtype)
+        I[np.arange(n_nodes), feat_argmax] = 1.0  # one-hot
+
+        # ---------- (2) hard split decision per node ----------
+        # s = sigmoid(<I,T> - <I,x>), then hard round to {0,1}
+        # <I,T> per node:
+        t_proj = (I * T).sum(axis=1)  # (n_nodes,)
+        if X.shape[1] < I_logits.shape[1]:
+            pad_width = I_logits.shape[1] - X.shape[1]
+            X = np.concatenate([X, np.zeros((X.shape[0], pad_width))], axis=1)
+        # <I,x> for each sample and node:
+        x_proj = X @ I.T  # (n_samples, n_nodes)
+        s_soft = 1.0 / (
+            1.0 + np.exp(-(t_proj[None, :] - x_proj))
+        )  # (n_samples, n_nodes)
+        s = (s_soft >= 0.5).astype(X.dtype)  # hard left decision {0,1}
+
+        # ---------- (3) path probabilities per leaf ----------
+        # gather per-leaf, per-level node decisions:
+        # s_selected[k, l, j] = decision for sample k at node node_idx[l, j]
+        s_selected = s[:, node_idx]  # (n_samples, n_leaves, depth)
+
+        # path_ids[l, j] == 0 → LEFT; == 1 → RIGHT
+        # p_term = (1 - path_id)*s_selected + path_id*(1 - s_selected)
+        p_term = (1.0 - path_ids) * s_selected + path_ids * (
+            1.0 - s_selected
+        )  # (n_samples, n_leaves, depth)
+        p_leaves = p_term.prod(axis=2)  # (n_samples, n_leaves)
+
+        # ---------- (4) aggregate leaf logits and softmax ----------
+        logits = p_leaves @ L  # (n_samples, n_out)
+        if n_classes is not None:
+            logits = logits[:, :n_classes]  # trim to actual classes
+
+        # optional temperature (you used 0.8 in MLP head)
+        tau = 0.8
+        # stable softmax
+        logits_scaled = logits / tau
+        logits_scaled = logits_scaled - logits_scaled.max(axis=1, keepdims=True)
+        probs = np.exp(logits_scaled)
+        probs /= probs.sum(axis=1, keepdims=True)
+        return probs
+
+    elif "cuda" in inference_device:
+        device = torch.device(inference_device)
+
+        mean = torch.as_tensor(train_mean, device=device, dtype=torch.float32)
+        std = torch.as_tensor(train_std, device=device, dtype=torch.float32)
+
+        X = torch.as_tensor(X_test, device=device, dtype=torch.float32).nan_to_num(0.0)
+        if scale:
+            X = (X - mean) / std
+        X = torch.clamp(X, -100.0, 100.0)  # (n_samples, n_features)
+
+        I_logits_t = torch.as_tensor(
+            I_logits, device=device, dtype=torch.float32
+        )  # (n_nodes, n_features)
+        T_t = torch.as_tensor(
+            T, device=device, dtype=torch.float32
+        )  # (n_nodes, n_features)
+        L_t = torch.as_tensor(
+            L, device=device, dtype=torch.float32
+        )  # (n_leaves, n_out)
+        path_ids_t = torch.as_tensor(
+            path_ids, device=device, dtype=torch.float32
+        )  # (n_leaves, depth)
+        node_idx_t = torch.as_tensor(
+            node_idx, device=device, dtype=torch.long
+        )  # (n_leaves, depth)
+
+        # (1) hard one-hot over features per node
+        feat_argmax = I_logits_t.argmax(dim=-1)  # (n_nodes,)
+        I = torch.zeros_like(I_logits_t).scatter_(
+            1, feat_argmax.view(-1, 1), 1.0
+        )  # (n_nodes, n_features)
+
+        # (2) hard split decision
+        t_proj = (I * T_t).sum(dim=1)  # (n_nodes,)
+        # Ensure feature dimension matches training (pad with zeros if necessary)
+        if X.shape[1] < I_logits_t.shape[1]:
+            pad_width = I_logits_t.shape[1] - X.shape[1]
+            X = torch.cat(
+                [X, torch.zeros((X.shape[0], pad_width), device=X.device)], dim=1
+            )
+
+        x_proj = X @ I.T  # (n_samples, n_nodes)
+        s_soft = torch.sigmoid(t_proj.unsqueeze(0) - x_proj)  # (n_samples, n_nodes)
+        s = (s_soft >= 0.5).to(X.dtype)  # {0,1}
+
+        # (3) path probabilities
+        s_selected = s.index_select(dim=1, index=node_idx_t.view(-1)).view(
+            s.shape[0], n_leaves, depth
+        )  # (n_samples, n_leaves, depth)
+
+        p_term = (1.0 - path_ids_t) * s_selected + path_ids_t * (1.0 - s_selected)
+        p_leaves = torch.prod(p_term, dim=2)  # (n_samples, n_leaves)
+
+        # (4) leaf aggregation + softmax
+        logits = p_leaves @ L_t  # (n_samples, n_out)
+        if n_classes is not None:
+            logits = logits[:, :n_classes]  # trim to actual classes
+        tau = 0.8
+        probs = torch.nn.functional.softmax(logits / tau, dim=1).detach().cpu().numpy()
+        return probs
+
     else:
         raise ValueError(f"Unknown inference_device: {inference_device}")
 
 
 class MotherNetClassifier(ClassifierMixin, BaseEstimator):
-    def __init__(self, path=None, device="cpu", label_offset=0, scale=True, inference_device="cpu", model=None, config=None):
+    def __init__(
+        self,
+        path=None,
+        device="cpu",
+        label_offset=0,
+        scale=True,
+        inference_device="cpu",
+        model=None,
+        config=None,
+    ):
         self.path = path
         self.device = device
         self.label_offset = label_offset
@@ -244,35 +567,87 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
             model, config = load_model(self.path, device=self.device)
             self.config = config
         if "model_type" not in config:
-            config['model_type'] = config.get("model_maker", 'tabpfn')
-        if config['model_type'] not in ["mlp", "mothernet", 'la_mothernet']:
+            config["model_type"] = config.get("model_maker", "tabpfn")
+        if config["model_type"] not in ["mlp", "mothernet", "la_mothernet"]:
             raise ValueError(f"Incompatible model_type: {config['model_type']}")
         model.to(self.device)
         n_classes = len(le.classes_)
         indices = np.mod(np.arange(n_classes) + self.label_offset, n_classes)
-        layers = extract_mlp_model(model, config, X, np.mod(y + self.label_offset, n_classes), device=self.device,
-                                   inference_device=self.inference_device, scale=self.scale)
-        if self.label_offset == 0:
-            self.parameters_ = layers
+
+        if model.child_model == "gradtree":
+            self.parameters_ = extract_gradtree_model(
+                model,
+                config,
+                X,
+                np.mod(y + self.label_offset, n_classes),
+                device=self.device,
+                inference_device=self.inference_device,
+                scale=self.scale,
+            )
         else:
-            *lower_layers, b_last, w_last = layers
-            self.parameters_ = (*lower_layers, (b_last[indices], w_last[:, indices]))
+            layers = extract_mlp_model(
+                model,
+                config,
+                X,
+                np.mod(y + self.label_offset, n_classes),
+                device=self.device,
+                inference_device=self.inference_device,
+                scale=self.scale,
+            )
+            if self.label_offset == 0:
+                self.parameters_ = layers
+            else:
+                *lower_layers, b_last, w_last = layers
+                self.parameters_ = (
+                    *lower_layers,
+                    (b_last[indices], w_last[:, indices]),
+                )
         self.classes_ = le.classes_
         self.mean_ = np.nan_to_num(np.nanmean(X, axis=0), 0)
-        self.std_ = np.nanstd(X, axis=0, ddof=1) + .000001
+        self.std_ = np.nanstd(X, axis=0, ddof=1) + 0.000001
         self.std_[np.isnan(self.std_)] = 1
+        self.child_model = model.child_model
+        self.n_classes_ = n_classes  # Store number of classes
 
         return self
 
     def predict_proba(self, X):
-        return predict_with_mlp_model(self.mean_, self.std_, X, self.parameters_, scale=self.scale, inference_device=self.inference_device)
+        if self.child_model == "gradtree":
+            return predict_with_gradtree_model(
+                self.mean_,
+                self.std_,
+                X,
+                self.parameters_,
+                scale=self.scale,
+                inference_device=self.inference_device,
+                n_classes=self.n_classes_,
+            )
+
+        else:
+            return predict_with_mlp_model(
+                self.mean_,
+                self.std_,
+                X,
+                self.parameters_,
+                scale=self.scale,
+                inference_device=self.inference_device,
+            )
 
     def predict(self, X):
         return self.classes_[self.predict_proba(X).argmax(axis=1)]
 
 
 class MotherNetInitMLPClassifier(ClassifierMixin, BaseEstimator):
-    def __init__(self, path=None, device="cuda", learning_rate=1e-3, n_epochs=0, verbose=0, weight_decay=0, dropout_rate=0):
+    def __init__(
+        self,
+        path=None,
+        device="cuda",
+        learning_rate=1e-3,
+        n_epochs=0,
+        verbose=0,
+        weight_decay=0,
+        dropout_rate=0,
+    ):
         self.path = path
         self.device = device
         if path is None:
@@ -293,28 +668,49 @@ class MotherNetInitMLPClassifier(ClassifierMixin, BaseEstimator):
             raise ValueError(f"Only 10 classes supported, found {len(le.classes_)}")
         model, config = load_model(self.path, device=self.device)
         if "model_type" not in config:
-            config['model_type'] = config.get("model_maker", 'tabpfn')
-        if config['model_type'] not in ["mlp", "mothernet"]:
+            config["model_type"] = config.get("model_maker", "tabpfn")
+        if config["model_type"] not in ["mlp", "mothernet"]:
             raise ValueError(f"Incompatible model_type: {config['model_type']}")
         model.to(self.device)
-        layers = extract_mlp_model(model, config, X, y, device=self.device,
-                                   inference_device=self.device, scale=True)
-        hidden_size = config['mothernet']['predicted_hidden_layer_size']
-        n_layers = config['mothernet']['predicted_hidden_layers']
+        layers = extract_mlp_model(
+            model,
+            config,
+            X,
+            y,
+            device=self.device,
+            inference_device=self.device,
+            scale=True,
+        )
+        hidden_size = config["mothernet"]["predicted_hidden_layer_size"]
+        n_layers = config["mothernet"]["predicted_hidden_layers"]
         assert len(layers) == n_layers + 1  # n_layers counts number of hidden layers
-        nn = NeuralNetwork(n_features=X.shape[1], n_classes=len(le.classes_), hidden_size=hidden_size, n_layers=n_layers)
+        nn = NeuralNetwork(
+            n_features=X.shape[1],
+            n_classes=len(le.classes_),
+            hidden_size=hidden_size,
+            n_layers=n_layers,
+        )
         state_dict = {}
         for i, layer in enumerate(layers):
             state_dict[f"model.linear{i}.weight"] = torch.Tensor(layer[1]).T
             state_dict[f"model.linear{i}.bias"] = torch.Tensor(layer[0])
         nn.load_state_dict(state_dict)
         try:
-            nonlinearity = config['mothernet']['predicted_activation']
+            nonlinearity = config["mothernet"]["predicted_activation"]
         except (KeyError, TypeError):
             nonlinearity = "relu"
-        self.mlp = TorchMLP(hidden_size=hidden_size, n_layers=n_layers, learning_rate=self.learning_rate,
-                            device=self.device, n_epochs=self.n_epochs, verbose=self.verbose, init_state=nn.state_dict(),
-                            nonlinearity=nonlinearity, dropout_rate=self.dropout_rate, weight_decay=self.weight_decay)
+        self.mlp = TorchMLP(
+            hidden_size=hidden_size,
+            n_layers=n_layers,
+            learning_rate=self.learning_rate,
+            device=self.device,
+            n_epochs=self.n_epochs,
+            verbose=self.verbose,
+            init_state=nn.state_dict(),
+            nonlinearity=nonlinearity,
+            dropout_rate=self.dropout_rate,
+            weight_decay=self.weight_decay,
+        )
         self.scaler = StandardScaler().fit(X)
         self.mlp.fit(X, y)
         self.parameters_ = layers
@@ -330,14 +726,18 @@ class MotherNetInitMLPClassifier(ClassifierMixin, BaseEstimator):
 
 
 class ShiftClassifier(ClassifierMixin, BaseEstimator):
-    def __init__(self, base_estimator, feature_shift=0, label_shift=0, transformer=None):
+    def __init__(
+        self, base_estimator, feature_shift=0, label_shift=0, transformer=None
+    ):
         self.base_estimator = base_estimator
         self.feature_shift = feature_shift
         self.label_shift = label_shift
         self.transformer = transformer
 
     def _feature_shift(self, X):
-        return np.concatenate([X[:, self.feature_shift:], X[:, :self.feature_shift]], axis=1)
+        return np.concatenate(
+            [X[:, self.feature_shift :], X[:, : self.feature_shift]], axis=1
+        )
 
     def fit(self, X, y):
         if self.transformer is not None:
@@ -345,10 +745,12 @@ class ShiftClassifier(ClassifierMixin, BaseEstimator):
         X = self._feature_shift(X)
         unique_y = np.unique(y)
         self.n_classes_ = len(np.unique(y))
-        self.class_indices_ = np.mod(np.arange(self.n_classes_) + self.label_shift, self.n_classes_)
+        self.class_indices_ = np.mod(
+            np.arange(self.n_classes_) + self.label_shift, self.n_classes_
+        )
 
         if not (unique_y == np.arange(self.n_classes_)).all():
-            raise ValueError('y has to be in range(0, n_classes) but is %s' % unique_y)
+            raise ValueError("y has to be in range(0, n_classes) but is %s" % unique_y)
         self.base_estimator_ = clone(self.base_estimator)
         self.base_estimator_.fit(X, np.mod(y + self.label_shift, self.n_classes_))
         return self
@@ -364,8 +766,18 @@ class ShiftClassifier(ClassifierMixin, BaseEstimator):
 
 
 class EnsembleMeta(ClassifierMixin, BaseEstimator):
-    def __init__(self, base_estimator, n_estimators=8, cat_features=None, random_state=None, power=True,
-                 label_shift=True, feature_shift=True, onehot=True, n_jobs=-1):
+    def __init__(
+        self,
+        base_estimator,
+        n_estimators=8,
+        cat_features=None,
+        random_state=None,
+        power=True,
+        label_shift=True,
+        feature_shift=True,
+        onehot=True,
+        n_jobs=-1,
+    ):
         self.base_estimator = base_estimator
         self.n_estimators = n_estimators
         self.random_state = random_state
@@ -385,16 +797,28 @@ class EnsembleMeta(ClassifierMixin, BaseEstimator):
             use_power_transformer = [True, False]
         else:
             [False]
-        use_onehot = [True, False] if self.onehot and self.cat_features is not None and len(self.cat_features) else [False]
+        use_onehot = (
+            [True, False]
+            if self.onehot and self.cat_features is not None and len(self.cat_features)
+            else [False]
+        )
         feature_shifts = list(range(self.n_features_)) if self.feature_shift else [0]
         label_shifts = list(range(self.n_classes_)) if self.label_shift else [0]
-        shifts = list(itertools.product(label_shifts, feature_shifts, use_power_transformer, use_onehot))
+        shifts = list(
+            itertools.product(
+                label_shifts, feature_shifts, use_power_transformer, use_onehot
+            )
+        )
         rng = random.Random(self.random_state)
         shifts = rng.sample(shifts, min(len(shifts), self.n_estimators))
         estimators = []
 
         for label_shift, feature_shift, power_transformer, onehot in shifts:
-            clf = ShiftClassifier(self.base_estimator, feature_shift=feature_shift, label_shift=label_shift)
+            clf = ShiftClassifier(
+                self.base_estimator,
+                feature_shift=feature_shift,
+                label_shift=label_shift,
+            )
             estimators.append((power_transformer, onehot, clf))
 
         if self.cat_features is not None and len(self.cat_features):
@@ -403,7 +827,9 @@ class EnsembleMeta(ClassifierMixin, BaseEstimator):
             self.cat_mask_ = mask
             X_cat = X[:, mask]
             X_cont = X[:, ~mask]
-            self.ohe_ = OneHotEncoder(handle_unknown='ignore', max_categories=10, sparse_output=False)
+            self.ohe_ = OneHotEncoder(
+                handle_unknown="ignore", max_categories=10, sparse_output=False
+            )
             X_cat_ohe = self.ohe_.fit_transform(X_cat)
         else:
             X_cont = X
@@ -424,9 +850,13 @@ class EnsembleMeta(ClassifierMixin, BaseEstimator):
                 else:
                     X_cont_preprocessed = X_cont
                 if onehot:
-                    X_preprocessed = np.concatenate([X_cat_ohe, X_cont_preprocessed], axis=1)
+                    X_preprocessed = np.concatenate(
+                        [X_cat_ohe, X_cont_preprocessed], axis=1
+                    )
                 elif X_cat is not None:
-                    X_preprocessed = np.concatenate([X_cat, X_cont_preprocessed], axis=1)
+                    X_preprocessed = np.concatenate(
+                        [X_cat, X_cont_preprocessed], axis=1
+                    )
                 else:
                     X_preprocessed = X_cont_preprocessed
             skb = None
@@ -465,9 +895,13 @@ class EnsembleMeta(ClassifierMixin, BaseEstimator):
                 else:
                     X_cont_preprocessed = X_cont
                 if onehot:
-                    X_preprocessed = np.concatenate([X_cat_ohe, X_cont_preprocessed], axis=1)
+                    X_preprocessed = np.concatenate(
+                        [X_cat_ohe, X_cont_preprocessed], axis=1
+                    )
                 elif X_cat is not None:
-                    X_preprocessed = np.concatenate([X_cat, X_cont_preprocessed], axis=1)
+                    X_preprocessed = np.concatenate(
+                        [X_cat, X_cont_preprocessed], axis=1
+                    )
                 else:
                     X_preprocessed = X_cont_preprocessed
             if X_preprocessed.shape[1] > 100:
