@@ -415,8 +415,16 @@ def predict_with_gradtree_model(
         X = np.clip(X, -100, 100)  # (n_samples, n_features)
 
         # ---------- (1) hard feature selection per node: I ∈ {0,1}^{n_nodes × n_features} ----------
+        # Determine number of actual features (before padding)
+        n_actual_features = len(train_mean) if scale else X.shape[1]
+
+        # Mask padded features to prevent selection
+        I_logits_masked = I_logits.copy()
+        if n_actual_features < I_logits.shape[1]:
+            I_logits_masked[:, n_actual_features:] = -np.inf
+
         # argmax over features per node
-        feat_argmax = I_logits.argmax(axis=-1)  # (n_nodes,)
+        feat_argmax = I_logits_masked.argmax(axis=-1)  # (n_nodes,)
         I = np.zeros_like(I_logits, dtype=X.dtype)
         I[np.arange(n_nodes), feat_argmax] = 1.0  # one-hot
 
@@ -488,7 +496,15 @@ def predict_with_gradtree_model(
         )  # (n_leaves, depth)
 
         # (1) hard one-hot over features per node
-        feat_argmax = I_logits_t.argmax(dim=-1)  # (n_nodes,)
+        # Determine number of actual features (before padding)
+        n_actual_features = len(train_mean) if scale else X.shape[1]
+
+        # Mask padded features to prevent selection
+        I_logits_masked = I_logits_t.clone()
+        if n_actual_features < I_logits_t.shape[1]:
+            I_logits_masked[:, n_actual_features:] = float("-inf")
+
+        feat_argmax = I_logits_masked.argmax(dim=-1)  # (n_nodes,)
         I = torch.zeros_like(I_logits_t).scatter_(
             1, feat_argmax.view(-1, 1), 1.0
         )  # (n_nodes, n_features)
