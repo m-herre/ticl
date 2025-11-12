@@ -48,8 +48,14 @@ class ModelPredictor(nn.Module):
         dtype = x_test.dtype
 
         # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
-        I_soft = F.softmax(I_logits, dim=-1)  # (b, n_nodes, n_feat)
-        I_hard = one_hot_argmax(I_logits, dim=-1).to(dtype)  # (b, n_nodes, n_feat)
+        n_actual_features = x_test.shape[-1]
+        I_logits_masked = I_logits.clone()
+        I_logits_masked[:, :, n_actual_features:] = -float("inf")
+
+        I_soft = F.softmax(I_logits_masked, dim=-1)  # (b, n_nodes, n_feat)
+        I_hard = one_hot_argmax(I_logits_masked, dim=-1).to(
+            dtype
+        )  # (b, n_nodes, n_feat)
         I = st(
             I_hard, I_soft
         )  # ST entmax (paper)  [Alg.1, line 2-3], :contentReference[oaicite:3]{index=3}
