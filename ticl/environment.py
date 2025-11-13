@@ -2,6 +2,6 @@
 
 WANDB_INFO = {
     "project": "tabflex_new",
-    "entity": "mothernet",
-    "dir": './wandb',
+    "entity": "raiizen1-university-of-mannheim",
+    "dir": "./wandb",
 }

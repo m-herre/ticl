@@ -32,7 +32,7 @@ def entmax15(**kwargs):
 
 class ModelPredictor(nn.Module):
 
-    def tree_forward(self, x_test, I_logits, T, L):
+    def tree_forward(self, x_test, I_logits, T, L, n_actual_features):
         """
         Paper-exact GradTree pass with ST operators (Algorithm 1).
 
@@ -41,6 +41,7 @@ class ModelPredictor(nn.Module):
             I_logits: (batch, n_nodes, n_features)
             T:        (batch, n_nodes, n_features)
             L:        (batch, n_leaves, n_out)
+            n_actual_features: Number of real features (before padding)
 
         Returns:
             y_pred: (n_test, batch, n_out)
@@ -48,7 +49,7 @@ class ModelPredictor(nn.Module):
         dtype = x_test.dtype
 
         # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
-        n_actual_features = x_test.shape[-1]
+        # print(f"n_actual_features in tree_forward: {n_actual_features}")
         I_logits_masked = I_logits.clone()
         I_logits_masked[:, :, n_actual_features:] = -float("inf")
 
@@ -109,7 +110,7 @@ class ModelPredictor(nn.Module):
 
         if len(src) == 2:  # (x,y) and no style
             src = (None,) + src
-        _, x, y = src
+        info, x, y = src
 
         # Encode training part
         x_enc = self.encoder(x)
@@ -170,8 +171,15 @@ class ModelPredictor(nn.Module):
             I_logits, T, L = self.decoder(output, y[:single_eval_pos])
             x_test = torch.nan_to_num(x[single_eval_pos:], nan=0)
 
+            # Get actual feature count from info dict (before padding)
+            n_actual_features = (
+                info.get("num_features_used", x.shape[-1])
+                if info is not None
+                else x.shape[-1]
+            )
+
             # 🔧 Use soft differentiable tree inference
-            h = self.tree_forward(x_test, I_logits, T, L)
+            h = self.tree_forward(x_test, I_logits, T, L, n_actual_features)
 
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
