@@ -225,6 +225,7 @@ def get_mothernet_config():
             "decoder_activation": "gelu",
             "child_model": "mlp",
             "tree_depth": 5,
+            "n_estimators": 1,
         }
     }
 

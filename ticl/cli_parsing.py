@@ -344,6 +344,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
             type=int,
             help="Depth of the GradTree tree (only used when child-model is gradtree)",
         )
+        mothernet.add_argument(
+            "--n-estimators",
+            type=int,
+            help="Number of estimators for GradTree (GRANDE)",
+        )
         mothernet.set_defaults(**config["mothernet"])
 
     if model_type in ["additive", "baam"]:
