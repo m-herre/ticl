@@ -1,7 +1,6 @@
-*.sh
+
 *.cpkt
 \.github
-\experiments
 \logs
 
 # Byte-compiled / optimized / DLL files
