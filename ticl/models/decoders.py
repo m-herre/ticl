@@ -571,6 +571,7 @@ class GradTreeDecoder(nn.Module):
         decoder_activation="relu",
         in_size=100,
         tree_depth=3,
+        n_estimators=1,  # Added argument for GRANDE
     ):
         super().__init__()
         self.emsize = emsize
@@ -583,17 +584,21 @@ class GradTreeDecoder(nn.Module):
         self.in_size = in_size
         self.tree_depth = tree_depth
         self.activation = decoder_activation
+        self.n_estimators = n_estimators
 
         # number of internal nodes and leaves
         self.n_nodes = 2**tree_depth - 1
         self.n_leaves = 2**tree_depth
 
-        # how many scalars we need in the output vector φ
-        self.num_output_layer_weights = (
+        # Params per single tree
+        self.params_per_tree = (
             2 * self.n_nodes * self.in_size + self.n_leaves * self.n_out
         )
 
-        # summary layer = dataset embedding (you already have this in your codebase)
+        # Total params = params_per_tree * n_estimators
+        self.num_output_layer_weights = self.params_per_tree * self.n_estimators
+
+        # summary layer = dataset embedding
         self.summary_layer = SummaryLayer(
             emsize=emsize,
             n_out=n_out,
@@ -602,7 +607,7 @@ class GradTreeDecoder(nn.Module):
             nhead=nhead,
         )
 
-        # projection MLP to map summary embedding → φ
+        # projection MLP to map summary embedding -> (n_estimators * φ)
         mlp_in_size = self.summary_layer.out_size
         self.mlp = make_decoder_mlp(
             mlp_in_size,
@@ -648,36 +653,39 @@ class GradTreeDecoder(nn.Module):
             x: transformer output (n_samples x batch x emsize)
             y_src: labels for training portion
         Returns:
-            Tuple (I_logits, T, L)
+            Tuple (I_logits, T, L) with shapes containing n_estimators dimension
         """
         # Dataset-level summary
         x_summary = self.summary_layer(x, y_src)  # (batch, summary_dim)
         res = self.mlp(x_summary)  # (batch, total_num_params)
 
-        # Sequentially unpack res into tensors
         batch_size = res.shape[0]
+
+        # Reshape to separate estimators: (batch, n_estimators, params_per_tree)
+        res = res.view(batch_size, self.n_estimators, self.params_per_tree)
+
         offset = 0
 
-        # Feature-selection logits (n_nodes x n_features)
+        # Feature-selection logits (batch, n_estimators, n_nodes, n_features)
         I_logits_size = self.n_nodes * self.in_size
-        I_logits = res[:, offset : offset + I_logits_size]
-        I_logits = I_logits.view(batch_size, self.n_nodes, self.in_size)
+        I_logits = res[:, :, offset : offset + I_logits_size]
+        I_logits = I_logits.view(
+            batch_size, self.n_estimators, self.n_nodes, self.in_size
+        )
         offset += I_logits_size
 
-        # Thresholds (n_nodes x n_features)
+        # Thresholds (batch, n_estimators, n_nodes, n_features)
         T_size = self.n_nodes * self.in_size
-        T = res[:, offset : offset + T_size]
-        T = T.view(batch_size, self.n_nodes, self.in_size)
+        T = res[:, :, offset : offset + T_size]
+        T = T.view(batch_size, self.n_estimators, self.n_nodes, self.in_size)
         offset += T_size
 
-        # Leaf logits (n_leaves x n_out)
+        # Leaf logits (batch, n_estimators, n_leaves, n_out)
         L_size = self.n_leaves * self.n_out
-        L = res[:, offset : offset + L_size]
-        L = L.view(batch_size, self.n_leaves, self.n_out)
+        L = res[:, :, offset : offset + L_size]
+        L = L.view(batch_size, self.n_estimators, self.n_leaves, self.n_out)
         offset += L_size
 
-        assert offset == res.shape[1], "Mismatch in decoder output unpacking."
-
-        # V3 Complete
+        assert offset == self.params_per_tree, "Mismatch in decoder output unpacking."
 
         return I_logits, T, L
