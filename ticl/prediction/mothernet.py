@@ -179,9 +179,9 @@ def extract_gradtree_model(
     Extract GradTree parameters from a trained MotherNet model.
 
     Returns:
-        I_logits: Feature selection logits (n_nodes, n_features)
-        T: Thresholds (n_nodes, n_features)
-        L: Leaf logits (n_leaves, n_out)
+        I_logits: Feature selection logits (n_estimators, n_nodes, n_features)
+        T: Thresholds (n_estimators, n_nodes, n_features)
+        L: Leaf logits (n_estimators, n_leaves, n_out)
         max_features: For normalization
         tree_depth: Tree depth parameter
     """
@@ -253,11 +253,12 @@ def extract_gradtree_model(
 
         output = rearrange(x, "b n d -> n b d")
 
+    # Decoder now returns shapes (batch, n_estimators, ...)
     I_logits, T, L = model.decoder(output, ys)
     path_identifier_list = model.decoder.path_identifier_list
     internal_node_index_list = model.decoder.internal_node_index_list
 
-    # Handle device conversion (same logic as MLP case)
+    # Handle device conversion
     if inference_device == "cpu":
 
         def detach(x):
@@ -268,11 +269,12 @@ def extract_gradtree_model(
         def detach(x):
             return x.detach()
 
-    # Return as dictionary (expected by predict_with_gradtree_model)
+    # The input X_train was passed as a single "batch".
+    # Decoder output is (batch, est, ...). We squeeze dim 0 to get (est, ...).
     return {
-        "I_logits": detach(I_logits),
-        "T": detach(T),
-        "L": detach(L),
+        "I_logits": detach(I_logits.squeeze(0)),
+        "T": detach(T.squeeze(0)),
+        "L": detach(L.squeeze(0)),
         "path_identifier_list": detach(path_identifier_list),
         "internal_node_index_list": detach(internal_node_index_list),
     }
@@ -384,26 +386,21 @@ def predict_with_gradtree_model(
     n_classes=None,
 ):
     """
-    Inference for MotherNet+GradTree models.
+    Inference for MotherNet+GradTree (GRANDE Ensembles).
     """
-    # ---------- unpack & squeeze batch axis if present ----------
-    I_logits = tree_params["I_logits"]
-    T = tree_params["T"]
-    L = tree_params["L"]
-    path_ids = tree_params["path_identifier_list"]
-    node_idx = tree_params["internal_node_index_list"]
+    # Unpack parameters. Shapes are (n_estimators, ...)
+    I_logits = tree_params["I_logits"]  # (E, N, F)
+    T = tree_params["T"]  # (E, N, F)
+    L = tree_params["L"]  # (E, Leaves, Out)
+    path_ids = tree_params["path_identifier_list"]  # (Leaves, Depth)
+    node_idx = tree_params["internal_node_index_list"]  # (Leaves, Depth)
 
-    # If the decoder emitted a batch dimension (e.g. ensembles), take the first one for deterministic inference
-    if I_logits.ndim == 3:
-        I_logits = I_logits[0]
-    if T.ndim == 3:
-        T = T[0]
-    if L.ndim == 3:
-        L = L[0]
+    # Note: I_logits is now always (E, N, F) due to extract_gradtree_model squeezing the batch.
+    # We do NOT take [0] index here, we must iterate/broadcast over E.
 
     # shapes
-    n_nodes, n_features = I_logits.shape
-    n_leaves, n_out = L.shape
+    n_est, n_nodes, n_features_logits = I_logits.shape
+    n_leaves, n_out = L.shape[1], L.shape[2]
     depth = path_ids.shape[1]
 
     # ---------- preprocess test features ----------
@@ -414,54 +411,71 @@ def predict_with_gradtree_model(
             X = (X - train_mean) / train_std
         X = np.clip(X, -100, 100)  # (n_samples, n_features)
 
-        # ---------- (1) hard feature selection per node: I ∈ {0,1}^{n_nodes × n_features} ----------
-        # Determine number of actual features (before padding)
+        # ---------- (1) hard feature selection per node per estimator ----------
+        # I ∈ {0,1}^{n_est × n_nodes × n_features}
         n_actual_features = len(train_mean) if scale else X.shape[1]
 
-        # Mask padded features to prevent selection
+        # Mask padded features
         I_logits_masked = I_logits.copy()
-        if n_actual_features < I_logits.shape[1]:
-            I_logits_masked[:, n_actual_features:] = -np.inf
+        if n_actual_features < n_features_logits:
+            I_logits_masked[:, :, n_actual_features:] = -np.inf
 
-        # argmax over features per node
-        feat_argmax = I_logits_masked.argmax(axis=-1)  # (n_nodes,)
+        feat_argmax = I_logits_masked.argmax(axis=-1)  # (n_est, n_nodes)
+
+        # Create one-hot I
         I = np.zeros_like(I_logits, dtype=X.dtype)
-        I[np.arange(n_nodes), feat_argmax] = 1.0  # one-hot
+        # Advanced indexing to set ones
+        # We need indices for dim0 (E), dim1 (N), dim2 (FeatureIndex)
+        idx_E = np.arange(n_est)[:, None]
+        idx_N = np.arange(n_nodes)[None, :]
+        I[idx_E, idx_N, feat_argmax] = 1.0
 
         # ---------- (2) hard split decision per node ----------
-        # s = sigmoid(<I,T> - <I,x>), then hard round to {0,1}
-        # <I,T> per node:
-        t_proj = (I * T).sum(axis=1)  # (n_nodes,)
-        if X.shape[1] < I_logits.shape[1]:
-            pad_width = I_logits.shape[1] - X.shape[1]
+        # <I,T>: sum over features
+        t_proj = (I * T).sum(axis=-1)  # (n_est, n_nodes)
+
+        # Pad X if necessary
+        if X.shape[1] < n_features_logits:
+            pad_width = n_features_logits - X.shape[1]
             X = np.concatenate([X, np.zeros((X.shape[0], pad_width))], axis=1)
-        # <I,x> for each sample and node:
-        x_proj = X @ I.T  # (n_samples, n_nodes)
-        s_soft = 1.0 / (
-            1.0 + np.exp(-(t_proj[None, :] - x_proj))
-        )  # (n_samples, n_nodes)
-        s = (s_soft >= 0.5).astype(X.dtype)  # hard left decision {0,1}
+
+        # <I,x>: (S, F) @ (E, N, F).T -> (S, E, N)
+        # Using einsum for clarity
+        x_proj = np.einsum("sf,enf->sen", X, I)  # (n_samples, n_est, n_nodes)
+
+        # Compare: sigmoid(t - x)
+        # t_proj is (E, N), x_proj is (S, E, N)
+        s_soft = 1.0 / (1.0 + np.exp(-(t_proj[None, :, :] - x_proj)))
+        s = (s_soft >= 0.5).astype(X.dtype)  # (S, E, N)
 
         # ---------- (3) path probabilities per leaf ----------
-        # gather per-leaf, per-level node decisions:
-        # s_selected[k, l, j] = decision for sample k at node node_idx[l, j]
-        s_selected = s[:, node_idx]  # (n_samples, n_leaves, depth)
+        # Gather s at specific node indices for path calculation
+        # node_idx is (Leaves, Depth)
+        # s is (S, E, Nodes)
+        # We want s_selected (S, E, Leaves, Depth)
+        s_selected = s[..., node_idx]
 
-        # path_ids[l, j] == 0 → LEFT; == 1 → RIGHT
-        # p_term = (1 - path_id)*s_selected + path_id*(1 - s_selected)
-        p_term = (1.0 - path_ids) * s_selected + path_ids * (
-            1.0 - s_selected
-        )  # (n_samples, n_leaves, depth)
-        p_leaves = p_term.prod(axis=2)  # (n_samples, n_leaves)
+        # path_ids (Leaves, Depth) broadcasts
+        p_term = (1.0 - path_ids) * s_selected + path_ids * (1.0 - s_selected)
+        p_leaves = p_term.prod(axis=-1)  # (S, E, Leaves)
 
-        # ---------- (4) aggregate leaf logits and softmax ----------
-        logits = p_leaves @ L  # (n_samples, n_out)
+        # ---------- (4) aggregate leaf logits ----------
+        # L is (E, Leaves, Out)
+        logits_estimators = np.einsum("sel,elo->seo", p_leaves, L)  # (S, E, Out)
+
+        # Ensemble aggregation: Average logits (or probs, standard is usually probs for forests, but logits here matches tree_forward)
+        # Actually in tree_forward we averaged logits before softmax? No, tree_forward returned logits.
+        # But wait, predict_with_mlp does softmax at the end.
+        # Standard Random Forest averages Probabilities.
+        # But here L are raw logits.
+        # Let's average the logits first (Soft Vote vs Hard Vote nuances).
+        # To match `tree_forward`, we average logits.
+        logits = logits_estimators.mean(axis=1)  # (S, Out)
+
         if n_classes is not None:
-            logits = logits[:, :n_classes]  # trim to actual classes
+            logits = logits[:, :n_classes]
 
-        # optional temperature (you used 0.8 in MLP head)
         tau = 0.8
-        # stable softmax
         logits_scaled = logits / tau
         logits_scaled = logits_scaled - logits_scaled.max(axis=1, keepdims=True)
         probs = np.exp(logits_scaled)
@@ -477,63 +491,60 @@ def predict_with_gradtree_model(
         X = torch.as_tensor(X_test, device=device, dtype=torch.float32).nan_to_num(0.0)
         if scale:
             X = (X - mean) / std
-        X = torch.clamp(X, -100.0, 100.0)  # (n_samples, n_features)
+        X = torch.clamp(X, -100.0, 100.0)
 
         I_logits_t = torch.as_tensor(
             I_logits, device=device, dtype=torch.float32
-        )  # (n_nodes, n_features)
-        T_t = torch.as_tensor(
-            T, device=device, dtype=torch.float32
-        )  # (n_nodes, n_features)
-        L_t = torch.as_tensor(
-            L, device=device, dtype=torch.float32
-        )  # (n_leaves, n_out)
-        path_ids_t = torch.as_tensor(
-            path_ids, device=device, dtype=torch.float32
-        )  # (n_leaves, depth)
-        node_idx_t = torch.as_tensor(
-            node_idx, device=device, dtype=torch.long
-        )  # (n_leaves, depth)
+        )  # (E, N, F)
+        T_t = torch.as_tensor(T, device=device, dtype=torch.float32)  # (E, N, F)
+        L_t = torch.as_tensor(L, device=device, dtype=torch.float32)  # (E, L, O)
+        path_ids_t = torch.as_tensor(path_ids, device=device, dtype=torch.float32)
+        node_idx_t = torch.as_tensor(node_idx, device=device, dtype=torch.long)
 
-        # (1) hard one-hot over features per node
-        # Determine number of actual features (before padding)
         n_actual_features = len(train_mean) if scale else X.shape[1]
 
-        # Mask padded features to prevent selection
+        # (1) Masking
         I_logits_masked = I_logits_t.clone()
-        if n_actual_features < I_logits_t.shape[1]:
-            I_logits_masked[:, n_actual_features:] = float("-inf")
+        if n_actual_features < I_logits_t.shape[2]:
+            I_logits_masked[:, :, n_actual_features:] = float("-inf")
 
-        feat_argmax = I_logits_masked.argmax(dim=-1)  # (n_nodes,)
-        I = torch.zeros_like(I_logits_t).scatter_(
-            1, feat_argmax.view(-1, 1), 1.0
-        )  # (n_nodes, n_features)
+        feat_argmax = I_logits_masked.argmax(dim=-1)  # (E, N)
+        # One hot
+        I = torch.zeros_like(I_logits_t).scatter_(2, feat_argmax.unsqueeze(-1), 1.0)
 
-        # (2) hard split decision
-        t_proj = (I * T_t).sum(dim=1)  # (n_nodes,)
-        # Ensure feature dimension matches training (pad with zeros if necessary)
-        if X.shape[1] < I_logits_t.shape[1]:
-            pad_width = I_logits_t.shape[1] - X.shape[1]
+        # (2) Split
+        t_proj = (I * T_t).sum(dim=-1)  # (E, N)
+
+        if X.shape[1] < I_logits_t.shape[2]:
+            pad_width = I_logits_t.shape[2] - X.shape[1]
             X = torch.cat(
-                [X, torch.zeros((X.shape[0], pad_width), device=X.device)], dim=1
+                [X, torch.zeros((X.shape[0], pad_width), device=device)], dim=1
             )
 
-        x_proj = X @ I.T  # (n_samples, n_nodes)
-        s_soft = torch.sigmoid(t_proj.unsqueeze(0) - x_proj)  # (n_samples, n_nodes)
-        s = (s_soft >= 0.5).to(X.dtype)  # {0,1}
+        # x_proj: (S, F) @ (E, N, F).T -> (S, E, N)
+        x_proj = torch.einsum("sf,enf->sen", X, I)
 
-        # (3) path probabilities
-        s_selected = s.index_select(dim=1, index=node_idx_t.view(-1)).view(
-            s.shape[0], n_leaves, depth
-        )  # (n_samples, n_leaves, depth)
+        s_soft = torch.sigmoid(t_proj.unsqueeze(0) - x_proj)
+        s = (s_soft >= 0.5).to(X.dtype)
+
+        # (3) Path
+        # s is (S, E, N), node_idx_t is (Leaves, Depth)
+        # We want (S, E, Leaves, Depth)
+        # Expand s to use gathering? Or just simple pythonic index broadcasting if supported.
+        # Torch gather is tricky with multiple dims.
+        # Let's use simple indexing since node_idx_t is small constant.
+        s_selected = s[..., node_idx_t]  # Works in recent torch versions
 
         p_term = (1.0 - path_ids_t) * s_selected + path_ids_t * (1.0 - s_selected)
-        p_leaves = torch.prod(p_term, dim=2)  # (n_samples, n_leaves)
+        p_leaves = torch.prod(p_term, dim=-1)  # (S, E, Leaves)
 
-        # (4) leaf aggregation + softmax
-        logits = p_leaves @ L_t  # (n_samples, n_out)
+        # (4) Leaf Aggregation
+        logits_estimators = torch.einsum("sel,elo->seo", p_leaves, L_t)
+        logits = logits_estimators.mean(dim=1)  # (S, O)
+
         if n_classes is not None:
-            logits = logits[:, :n_classes]  # trim to actual classes
+            logits = logits[:, :n_classes]
+
         tau = 0.8
         probs = torch.nn.functional.softmax(logits / tau, dim=1).detach().cpu().numpy()
         return probs
