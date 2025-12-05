@@ -34,13 +34,13 @@ class ModelPredictor(nn.Module):
 
     def tree_forward(self, x_test, I_logits, T, L, n_actual_features):
         """
-        Paper-exact GradTree pass with ST operators (Algorithm 1).
+        Paper-exact GradTree pass with ST operators (Algorithm 1) for Ensembles (GRANDE).
 
         Args:
             x_test:   (n_test, batch, n_features)
-            I_logits: (batch, n_nodes, n_features)
-            T:        (batch, n_nodes, n_features)
-            L:        (batch, n_leaves, n_out)
+            I_logits: (batch, n_estimators, n_nodes, n_features)
+            T:        (batch, n_estimators, n_nodes, n_features)
+            L:        (batch, n_estimators, n_leaves, n_out)
             n_actual_features: Number of real features (before padding)
 
         Returns:
@@ -49,51 +49,56 @@ class ModelPredictor(nn.Module):
         dtype = x_test.dtype
 
         # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
-        # print(f"n_actual_features in tree_forward: {n_actual_features}")
         I_logits_masked = I_logits.clone()
-        I_logits_masked[:, :, n_actual_features:] = -float("inf")
+        # mask on last dim (features)
+        I_logits_masked[..., n_actual_features:] = -float("inf")
 
-        I_soft = F.softmax(I_logits_masked, dim=-1)  # (b, n_nodes, n_feat)
-        I_hard = one_hot_argmax(I_logits_masked, dim=-1).to(
-            dtype
-        )  # (b, n_nodes, n_feat)
-        I = st(
-            I_hard, I_soft
-        )  # ST entmax (paper)  [Alg.1, line 2-3], :contentReference[oaicite:3]{index=3}
+        # I_soft/hard: (batch, est, nodes, n_feat)
+        I_soft = F.softmax(I_logits_masked, dim=-1)
+        I_hard = one_hot_argmax(I_logits_masked, dim=-1).to(dtype)
+        I = st(I_hard, I_soft)
 
-        # 2) Split probability per node (left prob “s” in the paper)
-        #    s = sigmoid( <I,T> - <I,x> )  (Eq. 6), then ST rounding to {0,1} (Alg.1 line 11)
-        #    <I,T> is batch×nodes, <I,x> is test×batch×nodes
+        # 2) Split probability per node
+        # <I,T> is (batch, est, nodes)
+        s1_sum = torch.einsum("bein,bein->bei", T, I)
 
-        s1_sum = torch.einsum(
-            "bin,bin->bi", T, I
-        )  # b batch; t n_test; n n_features; i n_nodes
-        s2_sum = torch.einsum("tbn,bin->tbi", x_test, I)
+        # <I,x> x_test is (test, batch, feat), I is (batch, est, nodes, feat)
+        # Result needs to be (test, batch, est, nodes)
+        s2_sum = torch.einsum("tbn,bein->tbei", x_test, I)
 
-        s_soft = (F.softsign(s1_sum - s2_sum) + 1) / 2
+        # Broadcast s1_sum to (1, batch, est, nodes)
+        s_soft = (F.softsign(s1_sum.unsqueeze(0) - s2_sum) + 1) / 2
 
-        s_hard = torch.round(s_soft)  # (t, b, n_nodes)
-        s = st(
-            s_hard, s_soft
-        )  # ST on split (paper)  [Alg.1, line 11], :contentReference[oaicite:5]{index=5}
-        # Note: s is the LEFT probability. RIGHT probability is (1 - s).
-        # (No clamping here to follow the paper exactly.)
+        s_hard = torch.round(s_soft)  # (t, b, e, n_nodes)
+        s = st(s_hard, s_soft)
 
         if torch.isnan(s).any():
             print("⚠️ NaN detected in split probabilities! Check T / x_proj magnitudes.")
 
-        # 3) Path probabilities over levels (paper’s L(x|l,·) via p(l,j) bits; Alg.1 line 12)
-        s_selected = s[..., self.decoder.internal_node_index_list]
-        p_leaves = torch.prod(
-            (
-                (1 - self.decoder.path_identifier_list) * s_selected
-                + self.decoder.path_identifier_list * (1.0 - s_selected)
-            ),
-            dim=3,
-        )  # (t, b, l)
+        # 3) Path probabilities over levels
+        # self.decoder.internal_node_index_list shape: (n_leaves, depth)
+        # s shape: (t, b, e, n_nodes)
+        # We gather specific nodes for path calculation
+        s_selected = s[
+            ..., self.decoder.internal_node_index_list
+        ]  # (t, b, e, n_leaves, depth)
 
-        # 4) Expected leaf aggregation (Alg.1 line 14–16)
-        y_hat = torch.einsum("tbl,blo->tbo", p_leaves, L)  # (t, b, n_out)
+        path_ids = self.decoder.path_identifier_list  # (n_leaves, depth)
+
+        # Product over depth (last dim)
+        p_leaves = torch.prod(
+            ((1 - path_ids) * s_selected + path_ids * (1.0 - s_selected)),
+            dim=-1,
+        )  # (t, b, e, l)
+
+        # 4) Expected leaf aggregation
+        # L: (b, e, leaves, out)
+        y_hat_estimators = torch.einsum(
+            "tbel,belo->tbeo", p_leaves, L
+        )  # (t, b, e, n_out)
+
+        # 5) Ensemble Aggregation (Average over estimators)
+        y_hat = y_hat_estimators.mean(dim=2)  # (t, b, n_out)
 
         if torch.isnan(y_hat).any():
             print("❌ NaN detected in final output logits!")
@@ -202,6 +207,7 @@ class MotherNet(ModelPredictor):
         n_features,
         child_model="mlp",
         tree_depth=3,
+        n_estimators=10,
         dropout=0.0,
         y_encoder_layer=None,
         input_normalization=False,
@@ -295,6 +301,7 @@ class MotherNet(ModelPredictor):
                 decoder_hidden_layers=decoder_hidden_layers,
                 in_size=n_features,
                 tree_depth=tree_depth,
+                n_estimators=n_estimators,
             )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
