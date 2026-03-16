@@ -55,17 +55,34 @@ def build_tree_index_tensors(tree_depth):
     )
 
 
-def _make_generator(seed):
+def _normalize_device(device):
+    if isinstance(device, torch.device):
+        return device
+    return torch.device(device)
+
+
+def _make_generator(seed, device="cpu"):
     if seed is None:
         return None
-    generator = torch.Generator(device="cpu")
+    normalized_device = _normalize_device(device)
+    generator_device = (
+        normalized_device if normalized_device.type == "cuda" else torch.device("cpu")
+    )
+    generator = torch.Generator(device=generator_device)
     generator.manual_seed(int(seed))
     return generator
 
 
-def _sample_without_replacement(shape, population_size, generator):
-    random_scores = torch.rand(*shape, population_size, generator=generator)
-    return random_scores.argsort(dim=-1)
+def _sample_without_replacement(
+    shape, population_size, sample_size, generator, device
+):
+    random_scores = torch.rand(
+        *shape,
+        population_size,
+        generator=generator,
+        device=device,
+    )
+    return random_scores.topk(k=sample_size, dim=-1, sorted=False).indices
 
 
 def _sample_row_indices(
@@ -84,12 +101,17 @@ def _sample_row_indices(
             high=n_train,
             size=(batch_size, n_estimators, subset_size),
             generator=generator,
+            device=device,
         )
     else:
         row_indices = _sample_without_replacement(
-            (batch_size, n_estimators), n_train, generator
-        )[..., :subset_size]
-    return row_indices.to(device)
+            (batch_size, n_estimators),
+            n_train,
+            subset_size,
+            generator,
+            device,
+        )
+    return row_indices
 
 
 def build_grande_context(
@@ -101,7 +123,8 @@ def build_grande_context(
     device,
     seed=None,
 ):
-    generator = _make_generator(seed)
+    device = _normalize_device(device)
+    generator = _make_generator(seed, device=device)
     take = min(int(num_features_used), selected_variables)
     if take <= 0:
         raise ValueError("num_features_used must be positive")
@@ -114,8 +137,10 @@ def build_grande_context(
     sampled_features = _sample_without_replacement(
         (batch_size, n_estimators),
         int(num_features_used),
+        take,
         generator,
-    )[..., :take]
+        device,
+    )
     features_by_estimator[..., :take] = sampled_features
     feature_mask[..., :take] = True
 
@@ -130,14 +155,9 @@ def gather_estimator_features(x, features_by_estimator):
     # x: (n_samples, batch, n_features)
     # features_by_estimator: (batch, estimators, selected_variables)
     x_perm = x.permute(1, 0, 2)
-    gather_index = features_by_estimator.unsqueeze(1).expand(
-        x_perm.shape[0], x_perm.shape[1], features_by_estimator.shape[1], features_by_estimator.shape[2]
-    )
-    x_expanded = x_perm.unsqueeze(2).expand(
-        x_perm.shape[0], x_perm.shape[1], features_by_estimator.shape[1], x_perm.shape[2]
-    )
-    gathered = torch.gather(x_expanded, dim=3, index=gather_index)
-    return gathered.permute(1, 0, 2, 3)
+    batch_index = torch.arange(x_perm.shape[0], device=x.device)[:, None, None]
+    gathered = x_perm[batch_index, :, features_by_estimator]
+    return gathered.permute(3, 0, 1, 2)
 
 
 def _safe_mean_and_std(values, valid_mask, dim):
@@ -179,7 +199,9 @@ def build_grande_feature_stats(
         device=x_train.device,
         dtype=x_train.dtype,
     )
-    generator = _make_generator(None if seed is None else seed + 1)
+    generator = _make_generator(
+        None if seed is None else seed + 1, device=x_train.device
+    )
     n_train = x_train.shape[0]
     use_subset = data_subset_fraction < 1.0 or bootstrap
 
