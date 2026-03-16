@@ -39,7 +39,7 @@ class ModelPredictor(nn.Module):
         Args:
             x_test:   (n_test, batch, n_features)
             I_logits: (batch, n_estimators, n_nodes, n_features)
-            T:        (batch, n_estimators, n_nodes, n_features)
+            T:        (batch, n_estimators, n_nodes) — scalar threshold per node
             L:        (batch, n_estimators, n_leaves, n_out)
             n_actual_features: Number of real features (before padding)
 
@@ -59,15 +59,14 @@ class ModelPredictor(nn.Module):
         I = st(I_hard, I_soft)
 
         # 2) Split probability per node
-        # <I,T> is (batch, est, nodes)
-        s1_sum = torch.einsum("bein,bein->bei", T, I)
+        # T is (batch, est, nodes) — scalar threshold, no feature-dim dot product needed
 
         # <I,x> x_test is (test, batch, feat), I is (batch, est, nodes, feat)
         # Result needs to be (test, batch, est, nodes)
         s2_sum = torch.einsum("tbn,bein->tbei", x_test, I)
 
-        # Broadcast s1_sum to (1, batch, est, nodes)
-        s_soft = (F.softsign(s1_sum.unsqueeze(0) - s2_sum) + 1) / 2
+        # Broadcast T to (1, batch, est, nodes)
+        s_soft = (F.softsign(T.unsqueeze(0) - s2_sum) + 1) / 2
 
         s_hard = torch.round(s_soft)  # (t, b, e, n_nodes)
         s = st(s_hard, s_soft)

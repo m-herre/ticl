@@ -591,8 +591,11 @@ class GradTreeDecoder(nn.Module):
         self.n_leaves = 2**tree_depth
 
         # Params per single tree
+        # I_logits: n_nodes * in_size (feature selection logits)
+        # T: n_nodes (scalar threshold per node — no feature dim needed when predicted)
+        # L: n_leaves * n_out (leaf logits)
         self.params_per_tree = (
-            2 * self.n_nodes * self.in_size + self.n_leaves * self.n_out
+            self.n_nodes * self.in_size + self.n_nodes + self.n_leaves * self.n_out
         )
 
         # Total params = params_per_tree * n_estimators
@@ -653,7 +656,10 @@ class GradTreeDecoder(nn.Module):
             x: transformer output (n_samples x batch x emsize)
             y_src: labels for training portion
         Returns:
-            Tuple (I_logits, T, L) with shapes containing n_estimators dimension
+            Tuple (I_logits, T, L):
+                I_logits: (batch, n_estimators, n_nodes, n_features)
+                T: (batch, n_estimators, n_nodes) — scalar threshold per node
+                L: (batch, n_estimators, n_leaves, n_out)
         """
         # Dataset-level summary
         x_summary = self.summary_layer(x, y_src)  # (batch, summary_dim)
@@ -674,10 +680,10 @@ class GradTreeDecoder(nn.Module):
         )
         offset += I_logits_size
 
-        # Thresholds (batch, n_estimators, n_nodes, n_features)
-        T_size = self.n_nodes * self.in_size
+        # Thresholds (batch, n_estimators, n_nodes) — scalar per node
+        T_size = self.n_nodes
         T = res[:, :, offset : offset + T_size]
-        T = T.view(batch_size, self.n_estimators, self.n_nodes, self.in_size)
+        T = T.view(batch_size, self.n_estimators, self.n_nodes)
         offset += T_size
 
         # Leaf logits (batch, n_estimators, n_leaves, n_out)
