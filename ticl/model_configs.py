@@ -232,6 +232,7 @@ def get_mothernet_config():
             "grande_dropout": 0.0,
             "missing_values": True,
             "grande_random_state": 42,
+            "grande_profile": False,
         }
     }
 

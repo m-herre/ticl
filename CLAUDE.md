@@ -130,3 +130,5 @@ When comparing outputs against `grande.py`, do not assume parity unless these ga
 - `GrandeDecoder` does **not** predict `features_by_estimator`. Those feature subsets are sampled externally via `build_grande_context()` and must be carried through extraction/inference.
 - The GRANDE path uses one shared torch kernel (`grande_forward`) for training forward and extracted inference. Avoid reintroducing separate numpy/CUDA implementations unless there is a strong reason.
 - Row subsampling / bootstrap affect the estimator-local feature statistics used by `GrandeDecoder`, not the inference-time tree kernel directly.
+- Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized; avoid reintroducing Python loops over `batch_size * n_estimators`.
+- Use `--grande-profile True` when investigating runtime. It records epoch-level timings for `grande_context_s`, `grande_feature_stats_s`, `grande_decoder_mlp_s`, and `grande_forward_s`.

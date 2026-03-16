@@ -1,3 +1,5 @@
+import time
+
 import torch
 from torch import nn
 import numpy as np
@@ -786,9 +788,13 @@ class GrandeDecoder(nn.Module):
             seed=seed,
         )
 
-    def forward(self, x, y_src, x_train_raw, context, seed=None):
+    def forward(self, x, y_src, x_train_raw, context, seed=None, return_profile=False):
         batch_size = x.shape[1]
         x_summary = self.summary_layer(x, y_src)
+        timings = {} if return_profile else None
+        if return_profile and x.device.type == "cuda":
+            torch.cuda.synchronize(x.device)
+        feature_stats_start = time.perf_counter() if return_profile else None
         feature_stats = build_grande_feature_stats(
             x_train=x_train_raw,
             y_train=y_src,
@@ -799,6 +805,12 @@ class GrandeDecoder(nn.Module):
             bootstrap=self.bootstrap,
             seed=seed,
         )
+        if return_profile:
+            if x.device.type == "cuda":
+                torch.cuda.synchronize(x.device)
+            timings["grande_feature_stats_s"] = (
+                time.perf_counter() - feature_stats_start
+            )
         decoder_input = torch.cat(
             [
                 x_summary.unsqueeze(1).expand(-1, self.n_estimators, -1),
@@ -807,7 +819,14 @@ class GrandeDecoder(nn.Module):
             ],
             dim=-1,
         )
+        if return_profile and x.device.type == "cuda":
+            torch.cuda.synchronize(x.device)
+        mlp_start = time.perf_counter() if return_profile else None
         res = self.mlp(decoder_input.reshape(batch_size * self.n_estimators, -1))
+        if return_profile:
+            if x.device.type == "cuda":
+                torch.cuda.synchronize(x.device)
+            timings["grande_decoder_mlp_s"] = time.perf_counter() - mlp_start
         res = res.view(batch_size, self.n_estimators, self.params_per_tree)
 
         offset = 0
@@ -846,4 +865,12 @@ class GrandeDecoder(nn.Module):
 
         assert offset == self.params_per_tree, "Mismatch in GRANDE decoder output unpacking."
 
+        if return_profile:
+            return (
+                split_values,
+                split_index_logits,
+                estimator_weights,
+                leaf_classes,
+                timings,
+            )
         return split_values, split_index_logits, estimator_weights, leaf_classes

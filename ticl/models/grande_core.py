@@ -63,6 +63,35 @@ def _make_generator(seed):
     return generator
 
 
+def _sample_without_replacement(shape, population_size, generator):
+    random_scores = torch.rand(*shape, population_size, generator=generator)
+    return random_scores.argsort(dim=-1)
+
+
+def _sample_row_indices(
+    *,
+    batch_size,
+    n_estimators,
+    n_train,
+    subset_size,
+    bootstrap,
+    generator,
+    device,
+):
+    if bootstrap:
+        row_indices = torch.randint(
+            low=0,
+            high=n_train,
+            size=(batch_size, n_estimators, subset_size),
+            generator=generator,
+        )
+    else:
+        row_indices = _sample_without_replacement(
+            (batch_size, n_estimators), n_train, generator
+        )[..., :subset_size]
+    return row_indices.to(device)
+
+
 def build_grande_context(
     *,
     batch_size,
@@ -73,22 +102,22 @@ def build_grande_context(
     seed=None,
 ):
     generator = _make_generator(seed)
+    take = min(int(num_features_used), selected_variables)
+    if take <= 0:
+        raise ValueError("num_features_used must be positive")
     features_by_estimator = torch.zeros(
         batch_size, n_estimators, selected_variables, dtype=torch.long
     )
     feature_mask = torch.zeros(
         batch_size, n_estimators, selected_variables, dtype=torch.bool
     )
-
-    take = min(int(num_features_used), selected_variables)
-    if take <= 0:
-        raise ValueError("num_features_used must be positive")
-
-    for batch_idx in range(batch_size):
-        for estimator_idx in range(n_estimators):
-            perm = torch.randperm(int(num_features_used), generator=generator)
-            features_by_estimator[batch_idx, estimator_idx, :take] = perm[:take]
-            feature_mask[batch_idx, estimator_idx, :take] = True
+    sampled_features = _sample_without_replacement(
+        (batch_size, n_estimators),
+        int(num_features_used),
+        generator,
+    )[..., :take]
+    features_by_estimator[..., :take] = sampled_features
+    feature_mask[..., :take] = True
 
     return {
         "features_by_estimator": features_by_estimator.to(device),
@@ -111,16 +140,21 @@ def gather_estimator_features(x, features_by_estimator):
     return gathered.permute(1, 0, 2, 3)
 
 
-def _safe_mean_and_std(values, valid_mask):
-    valid_count = valid_mask.sum(dim=0).clamp_min(1)
+def _safe_mean_and_std(values, valid_mask, dim):
+    valid_count = valid_mask.sum(dim=dim).clamp_min(1)
     masked_values = torch.where(valid_mask, values, torch.zeros_like(values))
-    mean = masked_values.sum(dim=0) / valid_count
+    mean = masked_values.sum(dim=dim) / valid_count
 
-    centered = torch.where(valid_mask, values - mean.unsqueeze(0), torch.zeros_like(values))
-    denom = valid_mask.sum(dim=0).sub(1).clamp_min(1)
-    std = torch.sqrt((centered.square().sum(dim=0)) / denom)
-    mean = torch.where(valid_mask.any(dim=0), mean, torch.zeros_like(mean))
-    std = torch.where(valid_mask.any(dim=0), std, torch.zeros_like(std))
+    centered = torch.where(
+        valid_mask,
+        values - mean.unsqueeze(dim),
+        torch.zeros_like(values),
+    )
+    denom = valid_mask.sum(dim=dim).sub(1).clamp_min(1)
+    std = torch.sqrt(centered.square().sum(dim=dim) / denom)
+    any_valid = valid_mask.any(dim=dim)
+    mean = torch.where(any_valid, mean, torch.zeros_like(mean))
+    std = torch.where(any_valid, std, torch.zeros_like(std))
     return mean, std
 
 
@@ -149,60 +183,62 @@ def build_grande_feature_stats(
     n_train = x_train.shape[0]
     use_subset = data_subset_fraction < 1.0 or bootstrap
 
-    for batch_idx in range(batch_size):
-        for estimator_idx in range(n_estimators):
-            feature_ids = features_by_estimator[batch_idx, estimator_idx]
-            mask = feature_mask[batch_idx, estimator_idx]
-            used = int(mask.sum().item())
-            if used == 0:
-                continue
+    selected_x = gather_estimator_features(x_train, features_by_estimator).permute(
+        1, 2, 0, 3
+    )
+    if y_train.ndim == 1:
+        selected_y = y_train.unsqueeze(0).expand(batch_size, -1)
+    else:
+        selected_y = y_train.transpose(0, 1)
+    selected_y = selected_y.unsqueeze(1).expand(-1, n_estimators, -1)
 
-            selected_x = x_train[:, batch_idx, feature_ids[:used]]
-            if y_train.ndim == 1:
-                selected_y = y_train
-            else:
-                selected_y = y_train[:, batch_idx]
+    if use_subset:
+        subset_size = max(4, int(math.ceil(n_train * data_subset_fraction)))
+        if not bootstrap:
+            subset_size = min(subset_size, n_train)
+        row_indices = _sample_row_indices(
+            batch_size=batch_size,
+            n_estimators=n_estimators,
+            n_train=n_train,
+            subset_size=subset_size,
+            bootstrap=bootstrap,
+            generator=generator,
+            device=x_train.device,
+        )
+        selected_x = selected_x.gather(
+            dim=2,
+            index=row_indices.unsqueeze(-1).expand(-1, -1, -1, selected_variables),
+        )
+        selected_y = selected_y.gather(dim=2, index=row_indices)
 
-            if use_subset:
-                subset_size = max(4, int(math.ceil(n_train * data_subset_fraction)))
-                if bootstrap:
-                    row_indices = torch.randint(
-                        low=0,
-                        high=n_train,
-                        size=(subset_size,),
-                        generator=generator,
-                    ).to(x_train.device)
-                else:
-                    subset_size = min(subset_size, n_train)
-                    row_indices = torch.randperm(n_train, generator=generator)[
-                        :subset_size
-                    ].to(x_train.device)
-                selected_x = selected_x[row_indices]
-                selected_y = selected_y[row_indices]
+    active_feature_mask = feature_mask.unsqueeze(2)
+    valid_mask = active_feature_mask & ~torch.isnan(selected_x)
+    mean, std = _safe_mean_and_std(selected_x, valid_mask, dim=2)
+    active_feature_mask_float = feature_mask.to(dtype=x_train.dtype)
+    missing_rate = (
+        torch.isnan(selected_x).to(dtype=x_train.dtype).mean(dim=2)
+        * active_feature_mask_float
+    )
 
-            valid_mask = ~torch.isnan(selected_x)
-            mean, std = _safe_mean_and_std(selected_x, valid_mask)
-            missing_rate = (~valid_mask).float().mean(dim=0)
+    stats[..., 0] = mean * active_feature_mask_float
+    stats[..., 1] = std * active_feature_mask_float
+    stats[..., 2] = missing_rate
 
-            stats[batch_idx, estimator_idx, :used, 0] = mean
-            stats[batch_idx, estimator_idx, :used, 1] = std
-            stats[batch_idx, estimator_idx, :used, 2] = missing_rate
+    if n_out <= 1:
+        return stats
 
-            if n_out <= 1:
-                continue
-
-            class_targets = selected_y.long().clamp_min(0).clamp_max(n_out - 1)
-            clean_x = torch.nan_to_num(selected_x, nan=0.0)
-            for class_idx in range(n_out):
-                class_mask = (class_targets == class_idx).unsqueeze(-1) & valid_mask
-                denom = class_mask.sum(dim=0).clamp_min(1)
-                class_mean = torch.where(
-                    class_mask.any(dim=0),
-                    torch.where(class_mask, clean_x, torch.zeros_like(clean_x)).sum(dim=0)
-                    / denom,
-                    torch.zeros(used, device=x_train.device, dtype=x_train.dtype),
-                )
-                stats[batch_idx, estimator_idx, :used, 3 + class_idx] = class_mean
+    class_targets = selected_y.long().clamp_min(0).clamp_max(n_out - 1)
+    class_one_hot = F.one_hot(class_targets, num_classes=n_out).to(dtype=x_train.dtype)
+    valid_float = valid_mask.to(dtype=x_train.dtype)
+    clean_x = torch.nan_to_num(selected_x, nan=0.0)
+    class_denominator = torch.einsum("betk,betc->bekc", valid_float, class_one_hot)
+    class_mean = torch.where(
+        class_denominator > 0,
+        torch.einsum("betk,betc->bekc", clean_x * valid_float, class_one_hot)
+        / class_denominator.clamp_min(1),
+        torch.zeros_like(class_denominator),
+    )
+    stats[..., 3:] = class_mean * active_feature_mask_float.unsqueeze(-1)
 
     return stats
 

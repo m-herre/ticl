@@ -47,6 +47,8 @@ def train_epoch(
     total_loss = torch.tensor(0., device = device)
     nan_steps = torch.tensor(0., device = device)
     ignore_steps = torch.tensor(0., device = device)
+    train_eval_pos_sum = 0.0
+    test_eval_pos_sum = 0.0
     steps_per_epoch = len(dl)
     assert len(dl) % aggregate_k_gradients == 0, 'Please set the number of steps per epoch s.t. `aggregate_k_gradients` divides it.'
     if progress_bar:
@@ -55,8 +57,8 @@ def train_epoch(
         # change the description of the progress bar
         if progress_bar:
             dl.set_description(f'| train sample number: {single_eval_pos} | test sample number: {data[1].shape[0] - single_eval_pos}')
-        if wandb.run is not None:
-            wandb.log({'train_train_sample_number': single_eval_pos, 'train_test_sample_number': data[1].shape[0] - single_eval_pos})
+        train_eval_pos_sum += float(single_eval_pos)
+        test_eval_pos_sum += float(data[1].shape[0] - single_eval_pos)
 
         if using_dist and not (batch % aggregate_k_gradients == aggregate_k_gradients - 1):
             cm = model.no_sync()
@@ -82,7 +84,6 @@ def train_epoch(
                 )
                 loss = loss / aggregate_k_gradients
 
-            if wandb.run: wandb.log({'batch_loss': loss.mean().cpu().detach().item() * aggregate_k_gradients})
             loss.backward()
 
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
@@ -99,7 +100,12 @@ def train_epoch(
             
     return (total_loss / steps_per_epoch * aggregate_k_gradients,
             nan_steps.cpu().item() / steps_per_epoch,
-            ignore_steps.cpu().item()/steps_per_epoch)
+            ignore_steps.cpu().item()/steps_per_epoch,
+            {
+                "batch_loss": total_loss / steps_per_epoch * aggregate_k_gradients,
+                "train_train_sample_number": train_eval_pos_sum / steps_per_epoch,
+                "train_test_sample_number": test_eval_pos_sum / steps_per_epoch,
+            })
 
 
 def train(dl, model, criterion, optimizer_state=None, scheduler=None,
@@ -182,12 +188,15 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
         for epoch in range(start_epoch, epochs + 1):
             if verbose:
                 print(f"start of epoch {epoch}")
+            profile_model = model.module if hasattr(model, "module") else model
+            if hasattr(profile_model, "reset_grande_profile"):
+                profile_model.reset_grande_profile()
 
             epoch_start_time = time.time()
             if "cuda" in device:
                 gpu_start_time.record()
             
-            new_loss, nan_share, ignore_share = train_epoch(
+            new_loss, nan_share, ignore_share, train_metrics = train_epoch(
                 model, 
                 aggregate_k_gradients, 
                 using_dist, 
@@ -219,9 +228,31 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 print(
                     f'| end of epoch {epoch:3d} | Wallclock time: {train_time[-1]:5.2f}s | GPU time: {train_gpu_time[-1]:5.2f}s | mean loss {total_loss:5.4f} | ')
 
-                if wandb.run: 
-                    wandb.log({"avg_train_time": sum(train_time)/len(train_time), "train_time": train_time[-1]})
-                    wandb.log({"avg_train_gpu_time": sum(train_gpu_time)/len(train_gpu_time), "train_gpu_time": train_gpu_time[-1]})
+                grande_profile_stats = {}
+                if hasattr(profile_model, "get_grande_profile_stats"):
+                    grande_profile_stats = profile_model.get_grande_profile_stats(reset=True)
+                if wandb.run:
+                    wandb_metrics = {
+                        "avg_train_time": sum(train_time) / len(train_time),
+                        "train_time": train_time[-1],
+                        "avg_train_gpu_time": sum(train_gpu_time) / len(train_gpu_time),
+                        "train_gpu_time": train_gpu_time[-1],
+                        "avg_batch_loss": float(train_metrics["batch_loss"]),
+                        "train_train_sample_number": train_metrics["train_train_sample_number"],
+                        "train_test_sample_number": train_metrics["train_test_sample_number"],
+                    }
+                    wandb_metrics.update(grande_profile_stats)
+                    wandb.log(wandb_metrics)
+
+                if grande_profile_stats:
+                    print(
+                        " GRANDE profile "
+                        + " ".join(
+                            f"{name}={value:0.4f}s"
+                            for name, value in grande_profile_stats.items()
+                            if name.endswith("_s")
+                        )
+                    )
 
                 print(
                     f' lr {last_lr}'

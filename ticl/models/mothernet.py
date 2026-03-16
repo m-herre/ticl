@@ -1,3 +1,5 @@
+import time
+
 import torch, wandb
 import torch.nn as nn
 from torch.nn import TransformerEncoder
@@ -32,6 +34,44 @@ def entmax15(**kwargs):
 
 
 class ModelPredictor(nn.Module):
+    def _grande_profile_active(self):
+        return self.child_model == "grande" and getattr(self, "grande_profile", False)
+
+    def _sync_profile_device(self, device):
+        if self._grande_profile_active() and device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    def _start_grande_timer(self, device):
+        if not self._grande_profile_active():
+            return None
+        self._sync_profile_device(device)
+        return time.perf_counter()
+
+    def _stop_grande_timer(self, name, start, device):
+        if start is None:
+            return
+        self._sync_profile_device(device)
+        self.grande_profile_totals[name] = (
+            self.grande_profile_totals.get(name, 0.0)
+            + (time.perf_counter() - start)
+        )
+
+    def reset_grande_profile(self):
+        self.grande_profile_totals = {}
+        self.grande_profile_steps = 0
+
+    def get_grande_profile_stats(self, reset=False):
+        if not self._grande_profile_active() or self.grande_profile_steps == 0:
+            return {}
+        stats = {
+            name: value / self.grande_profile_steps
+            for name, value in self.grande_profile_totals.items()
+        }
+        stats["grande_total_s"] = sum(stats.values())
+        stats["grande_profile_steps"] = self.grande_profile_steps
+        if reset:
+            self.reset_grande_profile()
+        return stats
 
     def tree_forward(self, x_test, I_logits, T, L, n_actual_features):
         """
@@ -170,17 +210,35 @@ class ModelPredictor(nn.Module):
             num_features_used = (
                 info.get("num_features_used", x.shape[-1]) if info is not None else x.shape[-1]
             )
+            context_start = self._start_grande_timer(x.device)
             context = self.decoder.build_context(
                 batch_size=x.shape[1],
                 num_features_used=num_features_used,
                 device=x.device,
             )
-            split_values, split_index_logits, estimator_weights, leaf_classes = self.decoder(
+            self._stop_grande_timer("grande_context_s", context_start, x.device)
+            decoder_out = self.decoder(
                 output,
                 y[:single_eval_pos],
                 x[:single_eval_pos],
                 context,
+                return_profile=self._grande_profile_active(),
             )
+            if self._grande_profile_active():
+                (
+                    split_values,
+                    split_index_logits,
+                    estimator_weights,
+                    leaf_classes,
+                    decoder_timings,
+                ) = decoder_out
+                for name, value in decoder_timings.items():
+                    self.grande_profile_totals[name] = (
+                        self.grande_profile_totals.get(name, 0.0) + value
+                    )
+            else:
+                split_values, split_index_logits, estimator_weights, leaf_classes = decoder_out
+            forward_start = self._start_grande_timer(x.device)
             h = grande_forward(
                 x=x[single_eval_pos:],
                 split_values=split_values,
@@ -196,6 +254,9 @@ class ModelPredictor(nn.Module):
                 missing_values=self.decoder.missing_values,
                 straight_through=True,
             )
+            self._stop_grande_timer("grande_forward_s", forward_start, x.device)
+            if self._grande_profile_active():
+                self.grande_profile_steps += 1
 
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
@@ -247,11 +308,14 @@ class MotherNet(ModelPredictor):
         grande_dropout=0.0,
         missing_values=True,
         grande_random_state=42,
+        grande_profile=False,
     ):
         super().__init__()
         self.child_model = child_model
         self.classification_task = classification_task
         self.tree_depth = tree_depth
+        self.grande_profile = grande_profile
+        self.reset_grande_profile()
 
         # decoder activation = "relu" is legacy behavior
         nhid = emsize * nhid_factor
