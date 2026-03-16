@@ -595,6 +595,7 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
         model.to(self.device)
         n_classes = len(le.classes_)
         indices = np.mod(np.arange(n_classes) + self.label_offset, n_classes)
+        self.class_indices_ = indices
 
         if model.child_model == "gradtree":
             self.parameters_ = extract_gradtree_model(
@@ -635,7 +636,7 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
 
     def predict_proba(self, X):
         if self.child_model == "gradtree":
-            return predict_with_gradtree_model(
+            probs = predict_with_gradtree_model(
                 self.mean_,
                 self.std_,
                 X,
@@ -644,6 +645,7 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
                 inference_device=self.inference_device,
                 n_classes=self.n_classes_,
             )
+            return probs[:, self.class_indices_]
 
         else:
             return predict_with_mlp_model(
