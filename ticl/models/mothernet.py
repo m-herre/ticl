@@ -23,7 +23,7 @@ def one_hot_argmax(logits: torch.Tensor, dim: int) -> torch.Tensor:
 
 def st(hard: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
     # straight-through: forward=hard, backward=soft
-    return soft - (soft - hard.detach())
+    return soft - (soft - hard).detach()
 
 
 def entmax15(**kwargs):
