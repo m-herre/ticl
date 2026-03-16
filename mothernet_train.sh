@@ -24,30 +24,8 @@ cd /work/mherre/ticl
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-# Set checkpoint path (use the latest one)
-# CHECKPOINT="/work/mherre/mothernet/ticl/models_diff/mn_childmodelgradtree_nestimators32_n2048_treedepth3_U1_12_03_2025_14_18_06_epoch_30.cpkt"
-
-# echo "Continuing training from: $CHECKPOINT"
-
-# # Continue training from checkpoint with additional options
-# python ticl/fit_model.py mothernet \
-#     --child-model gradtree \
-#     --progress-bar False \
-#     --use-wandb \
-#     --tree-depth 3 \
-#     --n-estimators 32 \
-#     --continue-run \
-#     --warm-start-from $CHECKPOINT \
-
 python ticl/fit_model.py mothernet \
-    --child-model gradtree \
     --progress-bar False \
     --use-wandb \
-    --tree-depth 4 \
-    --n-estimators 64 \
-    --warmup-epochs 1 \
-    # --num-steps 2048
-
-
 
 echo "Training completed at: $(date)"
