@@ -48,10 +48,9 @@ class ModelPredictor(nn.Module):
         """
         dtype = x_test.dtype
 
-        # 1) Feature selection: entmax then ST → hard one-hot with soft gradients
-        I_logits_masked = I_logits.clone()
-        # mask on last dim (features)
-        I_logits_masked[..., n_actual_features:] = -float("inf")
+        # 1) Feature selection: softmax then ST → hard one-hot with soft gradients
+        mask = torch.arange(I_logits.shape[-1], device=I_logits.device) >= n_actual_features
+        I_logits_masked = I_logits.masked_fill(mask, -float("inf"))
 
         # I_soft/hard: (batch, est, nodes, n_feat)
         I_soft = F.softmax(I_logits_masked, dim=-1)
@@ -59,10 +58,8 @@ class ModelPredictor(nn.Module):
         I = st(I_hard, I_soft)
 
         # 2) Split probability per node
-        # T is (batch, est, nodes) — scalar threshold, no feature-dim dot product needed
-
-        # <I,x> x_test is (test, batch, feat), I is (batch, est, nodes, feat)
-        # Result needs to be (test, batch, est, nodes)
+        # T is (batch, est, nodes) — scalar threshold
+        # <I,x> selects the chosen feature value per node (gradient flows through I via ST)
         s2_sum = torch.einsum("tbn,bein->tbei", x_test, I)
 
         # Broadcast T to (1, batch, est, nodes)
@@ -71,41 +68,24 @@ class ModelPredictor(nn.Module):
         s_hard = torch.round(s_soft)  # (t, b, e, n_nodes)
         s = st(s_hard, s_soft)
 
-        if torch.isnan(s).any():
-            print("⚠️ NaN detected in split probabilities! Check T / x_proj magnitudes.")
-
         # 3) Path probabilities over levels
-        # self.decoder.internal_node_index_list shape: (n_leaves, depth)
-        # s shape: (t, b, e, n_nodes)
-        # We gather specific nodes for path calculation
         s_selected = s[
             ..., self.decoder.internal_node_index_list
         ]  # (t, b, e, n_leaves, depth)
 
         path_ids = self.decoder.path_identifier_list  # (n_leaves, depth)
 
-        # Product over depth (last dim)
         p_leaves = torch.prod(
             ((1 - path_ids) * s_selected + path_ids * (1.0 - s_selected)),
             dim=-1,
         )  # (t, b, e, l)
 
-        # 4) Expected leaf aggregation
-        # L: (b, e, leaves, out)
+        # 4) Leaf aggregation → ensemble mean
         y_hat_estimators = torch.einsum(
             "tbel,belo->tbeo", p_leaves, L
         )  # (t, b, e, n_out)
 
-        # 5) Ensemble Aggregation (Average over estimators)
-        y_hat = y_hat_estimators.mean(dim=2)  # (t, b, n_out)
-
-        if torch.isnan(y_hat).any():
-            print("❌ NaN detected in final output logits!")
-            print(
-                "=> Check for exploding values in t_proj/x_proj or invalid entmax output."
-            )
-
-        return y_hat
+        return y_hat_estimators.mean(dim=2)  # (t, b, n_out)
 
     def forward(self, src, single_eval_pos=None):
         assert isinstance(

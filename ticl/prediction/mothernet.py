@@ -180,10 +180,8 @@ def extract_gradtree_model(
 
     Returns:
         I_logits: Feature selection logits (n_estimators, n_nodes, n_features)
-        T: Thresholds (n_estimators, n_nodes, n_features)
+        T: Thresholds (n_estimators, n_nodes) — scalar threshold per node
         L: Leaf logits (n_estimators, n_leaves, n_out)
-        max_features: For normalization
-        tree_depth: Tree depth parameter
     """
 
     if "cuda" in inference_device and device == "cpu":
@@ -390,7 +388,7 @@ def predict_with_gradtree_model(
     """
     # Unpack parameters. Shapes are (n_estimators, ...)
     I_logits = tree_params["I_logits"]  # (E, N, F)
-    T = tree_params["T"]  # (E, N, F)
+    T = tree_params["T"]  # (E, N) — scalar threshold per node
     L = tree_params["L"]  # (E, Leaves, Out)
     path_ids = tree_params["path_identifier_list"]  # (Leaves, Depth)
     node_idx = tree_params["internal_node_index_list"]  # (Leaves, Depth)
@@ -431,8 +429,7 @@ def predict_with_gradtree_model(
         I[idx_E, idx_N, feat_argmax] = 1.0
 
         # ---------- (2) hard split decision per node ----------
-        # <I,T>: sum over features
-        t_proj = (I * T).sum(axis=-1)  # (n_est, n_nodes)
+        # T is (E, N) — scalar threshold per node, no dot product needed
 
         # Pad X if necessary
         if X.shape[1] < n_features_logits:
@@ -440,12 +437,11 @@ def predict_with_gradtree_model(
             X = np.concatenate([X, np.zeros((X.shape[0], pad_width))], axis=1)
 
         # <I,x>: (S, F) @ (E, N, F).T -> (S, E, N)
-        # Using einsum for clarity
         x_proj = np.einsum("sf,enf->sen", X, I)  # (n_samples, n_est, n_nodes)
 
         # Compare: sigmoid(t - x)
-        # t_proj is (E, N), x_proj is (S, E, N)
-        s_soft = 1.0 / (1.0 + np.exp(-(t_proj[None, :, :] - x_proj)))
+        # T is (E, N), x_proj is (S, E, N)
+        s_soft = 1.0 / (1.0 + np.exp(-(T[None, :, :] - x_proj)))
         s = (s_soft >= 0.5).astype(X.dtype)  # (S, E, N)
 
         # ---------- (3) path probabilities per leaf ----------
@@ -496,7 +492,7 @@ def predict_with_gradtree_model(
         I_logits_t = torch.as_tensor(
             I_logits, device=device, dtype=torch.float32
         )  # (E, N, F)
-        T_t = torch.as_tensor(T, device=device, dtype=torch.float32)  # (E, N, F)
+        T_t = torch.as_tensor(T, device=device, dtype=torch.float32)  # (E, N)
         L_t = torch.as_tensor(L, device=device, dtype=torch.float32)  # (E, L, O)
         path_ids_t = torch.as_tensor(path_ids, device=device, dtype=torch.float32)
         node_idx_t = torch.as_tensor(node_idx, device=device, dtype=torch.long)
@@ -512,8 +508,7 @@ def predict_with_gradtree_model(
         # One hot
         I = torch.zeros_like(I_logits_t).scatter_(2, feat_argmax.unsqueeze(-1), 1.0)
 
-        # (2) Split
-        t_proj = (I * T_t).sum(dim=-1)  # (E, N)
+        # (2) Split — T_t is (E, N), scalar threshold per node
 
         if X.shape[1] < I_logits_t.shape[2]:
             pad_width = I_logits_t.shape[2] - X.shape[1]
@@ -524,7 +519,7 @@ def predict_with_gradtree_model(
         # x_proj: (S, F) @ (E, N, F).T -> (S, E, N)
         x_proj = torch.einsum("sf,enf->sen", X, I)
 
-        s_soft = torch.sigmoid(t_proj.unsqueeze(0) - x_proj)
+        s_soft = torch.sigmoid(T_t.unsqueeze(0) - x_proj)
         s = (s_soft >= 0.5).to(X.dtype)
 
         # (3) Path
