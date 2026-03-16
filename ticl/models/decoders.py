@@ -2,6 +2,13 @@ import torch
 from torch import nn
 import numpy as np
 
+from ticl.models.grande_core import (
+    build_grande_context,
+    build_grande_feature_stats,
+    build_tree_index_tensors,
+    resolve_selected_variables,
+)
+
 
 class LinearModelDecoder(nn.Module):
     def __init__(self, emsize=512, n_out=10, hidden_size=1024):
@@ -695,3 +702,148 @@ class GradTreeDecoder(nn.Module):
         assert offset == self.params_per_tree, "Mismatch in decoder output unpacking."
 
         return I_logits, T, L
+
+
+class GrandeDecoder(nn.Module):
+    def __init__(
+        self,
+        emsize=512,
+        n_out=10,
+        hidden_size=1024,
+        decoder_type="output_attention",
+        embed_dim=2048,
+        decoder_hidden_layers=1,
+        nhead=4,
+        decoder_activation="relu",
+        in_size=100,
+        tree_depth=3,
+        n_estimators=1,
+        selected_variables=16,
+        data_subset_fraction=1.0,
+        bootstrap=False,
+        grande_dropout=0.0,
+        missing_values=True,
+        grande_random_state=42,
+    ):
+        super().__init__()
+        self.emsize = emsize
+        self.hidden_size = hidden_size
+        self.n_out = n_out
+        self.decoder_type = decoder_type
+        self.embed_dim = embed_dim
+        self.decoder_hidden_layers = decoder_hidden_layers
+        self.nhead = nhead
+        self.in_size = in_size
+        self.tree_depth = tree_depth
+        self.activation = decoder_activation
+        self.n_estimators = n_estimators
+        self.data_subset_fraction = data_subset_fraction
+        self.bootstrap = bootstrap
+        self.grande_dropout = grande_dropout
+        self.missing_values = missing_values
+        self.grande_random_state = grande_random_state
+
+        self.selected_variables = resolve_selected_variables(selected_variables, in_size)
+        self.n_nodes = 2**tree_depth - 1
+        self.n_leaves = 2**tree_depth
+        self.stats_dim = 3 + n_out
+        self.params_per_tree = (
+            2 * self.n_nodes * self.selected_variables
+            + self.n_leaves
+            + self.n_leaves * self.n_out
+        )
+
+        self.summary_layer = SummaryLayer(
+            emsize=emsize,
+            n_out=n_out,
+            decoder_type=decoder_type,
+            embed_dim=embed_dim,
+            nhead=nhead,
+        )
+        self.estimator_embedding = nn.Embedding(n_estimators, hidden_size)
+        mlp_in_size = self.summary_layer.out_size + self.selected_variables * self.stats_dim + hidden_size
+        self.mlp = make_decoder_mlp(
+            mlp_in_size,
+            hidden_size,
+            self.params_per_tree,
+            n_layers=decoder_hidden_layers,
+            activation=decoder_activation,
+        )
+
+        path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
+        self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
+        self.register_buffer(
+            "internal_node_index_list", internal_node_index_list, persistent=True
+        )
+
+    def build_context(self, *, batch_size, num_features_used, device, seed=None):
+        return build_grande_context(
+            batch_size=batch_size,
+            n_estimators=self.n_estimators,
+            num_features_used=num_features_used,
+            selected_variables=self.selected_variables,
+            device=device,
+            seed=seed,
+        )
+
+    def forward(self, x, y_src, x_train_raw, context, seed=None):
+        batch_size = x.shape[1]
+        x_summary = self.summary_layer(x, y_src)
+        feature_stats = build_grande_feature_stats(
+            x_train=x_train_raw,
+            y_train=y_src,
+            features_by_estimator=context["features_by_estimator"],
+            feature_mask=context["feature_mask"],
+            n_out=self.n_out,
+            data_subset_fraction=self.data_subset_fraction,
+            bootstrap=self.bootstrap,
+            seed=seed,
+        )
+        decoder_input = torch.cat(
+            [
+                x_summary.unsqueeze(1).expand(-1, self.n_estimators, -1),
+                feature_stats.reshape(batch_size, self.n_estimators, -1),
+                self.estimator_embedding.weight.unsqueeze(0).expand(batch_size, -1, -1),
+            ],
+            dim=-1,
+        )
+        res = self.mlp(decoder_input.reshape(batch_size * self.n_estimators, -1))
+        res = res.view(batch_size, self.n_estimators, self.params_per_tree)
+
+        offset = 0
+        split_values_size = self.n_nodes * self.selected_variables
+        split_values = res[:, :, offset : offset + split_values_size].view(
+            batch_size,
+            self.n_estimators,
+            self.n_nodes,
+            self.selected_variables,
+        )
+        offset += split_values_size
+
+        split_index_size = self.n_nodes * self.selected_variables
+        split_index_logits = res[:, :, offset : offset + split_index_size].view(
+            batch_size,
+            self.n_estimators,
+            self.n_nodes,
+            self.selected_variables,
+        )
+        offset += split_index_size
+
+        estimator_weights = res[:, :, offset : offset + self.n_leaves].view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+        )
+        offset += self.n_leaves
+
+        leaf_classes = res[:, :, offset : offset + self.n_leaves * self.n_out].view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+            self.n_out,
+        )
+        offset += self.n_leaves * self.n_out
+
+        assert offset == self.params_per_tree, "Mismatch in GRANDE decoder output unpacking."
+
+        return split_values, split_index_logits, estimator_weights, leaf_classes

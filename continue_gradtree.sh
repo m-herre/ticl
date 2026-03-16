@@ -46,7 +46,7 @@ python ticl/fit_model.py mothernet \
     --tree-depth 4 \
     --n-estimators 64 \
     --warmup-epochs 1 \
-    # --num-steps 2048
+    --num-steps 2048
 
 
 

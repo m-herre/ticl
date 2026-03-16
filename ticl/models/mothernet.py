@@ -4,7 +4,8 @@ from torch.nn import TransformerEncoder
 import torch.nn.functional as F
 
 from ticl.models.encoders import OneHotAndLinear
-from ticl.models.decoders import MLPModelDecoder, GradTreeDecoder
+from ticl.models.decoders import MLPModelDecoder, GradTreeDecoder, GrandeDecoder
+from ticl.models.grande_core import grande_forward
 from ticl.models.layer import TransformerEncoderLayer, TransformerEncoderSimple
 from ticl.models.encoders import Linear
 
@@ -165,6 +166,37 @@ class ModelPredictor(nn.Module):
             # 🔧 Use soft differentiable tree inference
             h = self.tree_forward(x_test, I_logits, T, L, n_actual_features)
 
+        elif self.child_model == "grande":
+            num_features_used = (
+                info.get("num_features_used", x.shape[-1]) if info is not None else x.shape[-1]
+            )
+            context = self.decoder.build_context(
+                batch_size=x.shape[1],
+                num_features_used=num_features_used,
+                device=x.device,
+            )
+            split_values, split_index_logits, estimator_weights, leaf_classes = self.decoder(
+                output,
+                y[:single_eval_pos],
+                x[:single_eval_pos],
+                context,
+            )
+            h = grande_forward(
+                x=x[single_eval_pos:],
+                split_values=split_values,
+                split_index_logits=split_index_logits,
+                estimator_weights=estimator_weights,
+                leaf_classes=leaf_classes,
+                features_by_estimator=context["features_by_estimator"],
+                feature_mask=context["feature_mask"],
+                path_identifier_list=self.decoder.path_identifier_list,
+                internal_node_index_list=self.decoder.internal_node_index_list,
+                training=self.training,
+                dropout=self.decoder.grande_dropout,
+                missing_values=self.decoder.missing_values,
+                straight_through=True,
+            )
+
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
 
@@ -209,6 +241,12 @@ class MotherNet(ModelPredictor):
         tabpfn_zero_weights=True,
         decoder_activation="relu",
         predicted_activation="relu",
+        selected_variables=16,
+        data_subset_fraction=1.0,
+        bootstrap=False,
+        grande_dropout=0.0,
+        missing_values=True,
+        grande_random_state=42,
     ):
         super().__init__()
         self.child_model = child_model
@@ -281,6 +319,26 @@ class MotherNet(ModelPredictor):
                 in_size=n_features,
                 tree_depth=tree_depth,
                 n_estimators=n_estimators,
+            )
+        elif self.child_model == "grande":
+            self.decoder = GrandeDecoder(
+                emsize=emsize,
+                hidden_size=decoder_hidden_size or nhid,
+                n_out=n_out,
+                decoder_type=decoder_type,
+                embed_dim=decoder_embed_dim,
+                decoder_hidden_layers=decoder_hidden_layers,
+                nhead=nhead,
+                decoder_activation=decoder_activation,
+                in_size=n_features,
+                tree_depth=tree_depth,
+                n_estimators=n_estimators,
+                selected_variables=selected_variables,
+                data_subset_fraction=data_subset_fraction,
+                bootstrap=bootstrap,
+                grande_dropout=grande_dropout,
+                missing_values=missing_values,
+                grande_random_state=grande_random_state,
             )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")

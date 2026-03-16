@@ -337,17 +337,47 @@ def argparser_from_config(parser, description="Train Mothernet"):
         mothernet.add_argument(
             "--child-model",
             type=str,
-            help="Child model type to generate parameters for (mlp or gradtree)",
+            help="Child model type to generate parameters for (mlp, gradtree or grande)",
         )
         mothernet.add_argument(
             "--tree-depth",
             type=int,
-            help="Depth of the GradTree tree (only used when child-model is gradtree)",
+            help="Depth of the GradTree/GRANDE tree",
         )
         mothernet.add_argument(
             "--n-estimators",
             type=int,
-            help="Number of estimators for GradTree (GRANDE)",
+            help="Number of estimators for GradTree/GRANDE",
+        )
+        mothernet.add_argument(
+            "--selected-variables",
+            type=float,
+            help="Fixed estimator-local feature budget for GRANDE. Values <= 1 are interpreted as a fraction of max features.",
+        )
+        mothernet.add_argument(
+            "--data-subset-fraction",
+            type=float,
+            help="Training-row subset fraction used when building estimator-local GRANDE summaries.",
+        )
+        mothernet.add_argument(
+            "--bootstrap",
+            type=str2bool,
+            help="Whether GRANDE estimator-local summaries sample rows with replacement.",
+        )
+        mothernet.add_argument(
+            "--grande-dropout",
+            type=float,
+            help="Dropout applied to GRANDE estimator weights during training.",
+        )
+        mothernet.add_argument(
+            "--missing-values",
+            type=str2bool,
+            help="Whether GRANDE uses nan-aware routing instead of zero-imputation semantics.",
+        )
+        mothernet.add_argument(
+            "--grande-random-state",
+            type=int,
+            help="Random seed used for deterministic GRANDE feature-subset sampling during extraction.",
         )
         mothernet.set_defaults(**config["mothernet"])
 

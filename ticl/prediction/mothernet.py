@@ -19,6 +19,7 @@ from ticl.utils import normalize_by_used_features_f, normalize_data, fetch_model
 from ticl.evaluation.baselines.torch_mlp import TorchMLP, NeuralNetwork
 
 from ticl.models.mothernet import entmax15, one_hot_argmax
+from ticl.models.grande_core import grande_forward
 
 
 def extract_linear_model(model, X_train, y_train, device="cpu"):
@@ -275,6 +276,107 @@ def extract_gradtree_model(
         "L": detach(L.squeeze(0)),
         "path_identifier_list": detach(path_identifier_list),
         "internal_node_index_list": detach(internal_node_index_list),
+    }
+
+
+def extract_grande_model(
+    model, config, X_train, y_train, device="cpu", inference_device="cpu", scale=True
+):
+    if "cuda" in inference_device and device == "cpu":
+        raise ValueError("Cannot run inference on cuda when model is on cpu")
+    try:
+        max_features = config["prior"]["num_features"]
+    except KeyError:
+        max_features = 100
+    if torch.is_tensor(X_train):
+        xs = X_train.to(device)
+    else:
+        xs = torch.Tensor(X_train.astype(float)).to(device)
+    if torch.is_tensor(y_train):
+        ys = y_train.to(device)
+    else:
+        ys = torch.Tensor(y_train.astype(float)).to(device)
+
+    eval_position = X_train.shape[0]
+    if scale:
+        eval_xs_ = normalize_data(xs, eval_position)
+    else:
+        eval_xs_ = torch.clip(xs, min=-100, max=100)
+    eval_xs = normalize_by_used_features_f(eval_xs_, X_train.shape[-1], max_features)
+    if X_train.shape[1] > max_features:
+        raise ValueError(
+            f"Cannot run inference on data with more than {max_features} features"
+        )
+    x_all_torch = torch.concat(
+        [
+            eval_xs,
+            torch.zeros(
+                (X_train.shape[0], max_features - X_train.shape[1]), device=device
+            ),
+        ],
+        axis=1,
+    )
+    x_src = model.encoder(x_all_torch.unsqueeze(1))
+
+    if model.y_encoder is not None:
+        y_src = model.y_encoder(ys.unsqueeze(1).unsqueeze(-1))
+        train_x = x_src + y_src
+    else:
+        train_x = x_src
+
+    if hasattr(model, "transformer_encoder"):
+        output = model.transformer_encoder(train_x)
+    elif hasattr(model, "linear_attention"):
+        output = model.linear_attention(train_x)
+    else:
+        data = rearrange(train_x, "n b d -> b n d")
+        x = repeat(model.latents, "n d -> b n d", b=data.shape[0])
+
+        for cross_attn, cross_ff, self_attns in model.layers:
+            x = cross_attn(x, context=data) + x
+            x = cross_ff(x) + x
+
+            for self_attn, self_ff in self_attns:
+                x = self_attn(x) + x
+                x = self_ff(x) + x
+
+        output = rearrange(x, "b n d -> n b d")
+
+    context = model.decoder.build_context(
+        batch_size=1,
+        num_features_used=X_train.shape[1],
+        device=device,
+        seed=config["mothernet"].get("grande_random_state", 42),
+    )
+    split_values, split_index_logits, estimator_weights, leaf_classes = model.decoder(
+        output,
+        ys,
+        x_all_torch.unsqueeze(1),
+        context,
+        seed=config["mothernet"].get("grande_random_state", 42),
+    )
+
+    if inference_device == "cpu":
+
+        def detach(x):
+            return x.detach().cpu().numpy()
+
+    else:
+
+        def detach(x):
+            return x.detach()
+
+    return {
+        "split_values": detach(split_values.squeeze(0)),
+        "split_index_logits": detach(split_index_logits.squeeze(0)),
+        "estimator_weights": detach(estimator_weights.squeeze(0)),
+        "leaf_classes": detach(leaf_classes.squeeze(0)),
+        "features_by_estimator": detach(context["features_by_estimator"].squeeze(0)),
+        "feature_mask": detach(context["feature_mask"].squeeze(0)),
+        "path_identifier_list": detach(model.decoder.path_identifier_list),
+        "internal_node_index_list": detach(model.decoder.internal_node_index_list),
+        "missing_values": model.decoder.missing_values,
+        "feature_rescale": max_features / X_train.shape[1],
     }
 
 
@@ -548,6 +650,65 @@ def predict_with_gradtree_model(
         raise ValueError(f"Unknown inference_device: {inference_device}")
 
 
+def predict_with_grande_model(
+    train_mean,
+    train_std,
+    X_test,
+    grande_params,
+    scale=True,
+    inference_device="cpu",
+    n_classes=None,
+):
+    device = torch.device("cpu" if inference_device == "cpu" else inference_device)
+    mean = torch.as_tensor(train_mean, device=device, dtype=torch.float32)
+    std = torch.as_tensor(train_std, device=device, dtype=torch.float32)
+    X = torch.as_tensor(X_test, device=device, dtype=torch.float32).nan_to_num(0.0)
+    if scale:
+        X = (X - mean) / std
+    X = torch.clamp(X, -100.0, 100.0)
+    X = X * grande_params.get("feature_rescale", 1.0)
+
+    logits = grande_forward(
+        x=X.unsqueeze(1),
+        split_values=torch.as_tensor(
+            grande_params["split_values"], device=device, dtype=torch.float32
+        ).unsqueeze(0),
+        split_index_logits=torch.as_tensor(
+            grande_params["split_index_logits"], device=device, dtype=torch.float32
+        ).unsqueeze(0),
+        estimator_weights=torch.as_tensor(
+            grande_params["estimator_weights"], device=device, dtype=torch.float32
+        ).unsqueeze(0),
+        leaf_classes=torch.as_tensor(
+            grande_params["leaf_classes"], device=device, dtype=torch.float32
+        ).unsqueeze(0),
+        features_by_estimator=torch.as_tensor(
+            grande_params["features_by_estimator"], device=device, dtype=torch.long
+        ).unsqueeze(0),
+        feature_mask=torch.as_tensor(
+            grande_params["feature_mask"], device=device, dtype=torch.bool
+        ).unsqueeze(0),
+        path_identifier_list=torch.as_tensor(
+            grande_params["path_identifier_list"], device=device, dtype=torch.long
+        ),
+        internal_node_index_list=torch.as_tensor(
+            grande_params["internal_node_index_list"], device=device, dtype=torch.long
+        ),
+        training=False,
+        dropout=0.0,
+        missing_values=grande_params.get("missing_values", True),
+        straight_through=False,
+    ).squeeze(1)
+
+    if logits.shape[1] == 1 and n_classes == 2:
+        logits = torch.cat([-logits, logits], dim=1)
+    elif n_classes is not None:
+        logits = logits[:, :n_classes]
+
+    probs = torch.nn.functional.softmax(logits / 0.8, dim=1)
+    return probs.detach().cpu().numpy()
+
+
 class MotherNetClassifier(ClassifierMixin, BaseEstimator):
     def __init__(
         self,
@@ -607,6 +768,16 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
                 inference_device=self.inference_device,
                 scale=self.scale,
             )
+        elif model.child_model == "grande":
+            self.parameters_ = extract_grande_model(
+                model,
+                config,
+                X,
+                np.mod(y + self.label_offset, n_classes),
+                device=self.device,
+                inference_device=self.inference_device,
+                scale=self.scale,
+            )
         else:
             layers = extract_mlp_model(
                 model,
@@ -637,6 +808,17 @@ class MotherNetClassifier(ClassifierMixin, BaseEstimator):
     def predict_proba(self, X):
         if self.child_model == "gradtree":
             probs = predict_with_gradtree_model(
+                self.mean_,
+                self.std_,
+                X,
+                self.parameters_,
+                scale=self.scale,
+                inference_device=self.inference_device,
+                n_classes=self.n_classes_,
+            )
+            return probs[:, self.class_indices_]
+        elif self.child_model == "grande":
+            probs = predict_with_grande_model(
                 self.mean_,
                 self.std_,
                 X,

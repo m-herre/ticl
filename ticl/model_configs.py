@@ -226,6 +226,12 @@ def get_mothernet_config():
             "child_model": "mlp",
             "tree_depth": 5,
             "n_estimators": 1,
+            "selected_variables": 16,
+            "data_subset_fraction": 1.0,
+            "bootstrap": False,
+            "grande_dropout": 0.0,
+            "missing_values": True,
+            "grande_random_state": 42,
         }
     }
 
