@@ -208,6 +208,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
         )
         transformer.add_argument("--init-method", help="Weight initialization method.")
         transformer.add_argument(
+            "--recompute-attn",
+            type=str2bool,
+            help="Whether to recompute attention activations during backward to save memory at the cost of speed.",
+        )
+        transformer.add_argument(
             "--y-encoder", help='Encoder for labels. "linear", "onehot" or None.'
         )
         transformer.add_argument(
@@ -230,6 +235,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
         )
         linear_attention.add_argument(
             "--init-method", help="Weight initialization method."
+        )
+        linear_attention.add_argument(
+            "--recompute-attn",
+            type=str2bool,
+            help="Whether to recompute attention activations during backward to save memory at the cost of speed.",
         )
         linear_attention.add_argument(
             "--y-encoder", help='Encoder for labels. "linear", "onehot" or None.'
