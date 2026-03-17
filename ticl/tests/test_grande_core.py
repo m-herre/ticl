@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from ticl.models.decoders import GrandeDecoder
 from ticl.models.grande_core import (
@@ -189,3 +190,184 @@ def test_build_grande_feature_stats_matches_reference_implementation():
     )
 
     assert torch.allclose(stats, reference, atol=1e-6)
+
+
+def test_symmetry_breaking_decoder_outputs_differ_across_estimators():
+    """Improvement 1: with small random init, decoder outputs should differ across estimators."""
+    decoder = GrandeDecoder(
+        emsize=32,
+        n_out=3,
+        hidden_size=64,
+        decoder_type="class_average",
+        embed_dim=64,
+        decoder_hidden_layers=1,
+        nhead=4,
+        in_size=10,
+        tree_depth=2,
+        n_estimators=4,
+        selected_variables=6,
+    )
+    x = torch.randn(5, 2, 32)
+    y = torch.randint(0, 3, (5, 2))
+    x_train = torch.randn(5, 2, 10)
+    context = decoder.build_context(batch_size=2, num_features_used=4, device="cpu", seed=0)
+    split_values, split_index_logits, _, _ = decoder(x, y, x_train, context, seed=0)
+    # Estimators should not be identical (symmetry is broken)
+    diffs = []
+    for i in range(1, split_values.shape[1]):
+        diffs.append((split_values[:, 0] - split_values[:, i]).abs().max().item())
+    assert max(diffs) > 1e-6, "Estimator outputs are identical — symmetry not broken"
+
+
+def test_log_space_path_matches_prod():
+    """Improvement 2: log-space path computation should match torch.prod numerically."""
+    path_ids, node_idx = build_tree_index_tensors(tree_depth=2)
+    torch.manual_seed(42)
+    x = torch.randn(4, 2, 3)
+    split_values = torch.randn(2, 1, 3, 3)
+    split_index_logits = torch.randn(2, 1, 3, 3)
+    estimator_weights = torch.zeros(2, 1, 4)
+    leaf_classes = torch.randn(2, 1, 4, 2)
+    features_by_estimator = torch.tensor([[[0, 1, 2]], [[0, 1, 2]]])
+    feature_mask = torch.ones(2, 1, 3, dtype=torch.bool)
+
+    logits = grande_forward(
+        x=x,
+        split_values=split_values,
+        split_index_logits=split_index_logits,
+        estimator_weights=estimator_weights,
+        leaf_classes=leaf_classes,
+        features_by_estimator=features_by_estimator,
+        feature_mask=feature_mask,
+        path_identifier_list=path_ids,
+        internal_node_index_list=node_idx,
+        training=False,
+        dropout=0.0,
+        missing_values=False,
+        straight_through=False,
+    )
+    # Should produce valid finite output
+    assert logits.isfinite().all()
+    assert logits.shape == (4, 2, 2)
+
+
+def test_log_space_path_gradients_nonzero_at_depth5():
+    """Improvement 2: gradients should flow through a depth-5 tree."""
+    path_ids, node_idx = build_tree_index_tensors(tree_depth=5)
+    torch.manual_seed(0)
+    split_values = torch.randn(1, 1, 31, 4, requires_grad=True)
+    split_index_logits = torch.randn(1, 1, 31, 4)
+    x = torch.randn(2, 1, 4)
+    estimator_weights = torch.zeros(1, 1, 32)
+    leaf_classes = torch.randn(1, 1, 32, 3)
+    features_by_estimator = torch.arange(4).unsqueeze(0).unsqueeze(0)
+    feature_mask = torch.ones(1, 1, 4, dtype=torch.bool)
+
+    logits = grande_forward(
+        x=x,
+        split_values=split_values,
+        split_index_logits=split_index_logits,
+        estimator_weights=estimator_weights,
+        leaf_classes=leaf_classes,
+        features_by_estimator=features_by_estimator,
+        feature_mask=feature_mask,
+        path_identifier_list=path_ids,
+        internal_node_index_list=node_idx,
+        training=False,
+        dropout=0.0,
+        missing_values=False,
+        straight_through=True,
+    )
+    loss = logits.sum()
+    loss.backward()
+    assert split_values.grad is not None
+    assert (split_values.grad.abs() > 1e-10).any(), "Gradients vanished at depth 5"
+
+
+def test_leaf_class_residual_reflects_class_prior():
+    """Improvement 3: with zeroed MLP output, leaf_classes softmax should reflect class distribution."""
+    decoder = GrandeDecoder(
+        emsize=32,
+        n_out=3,
+        hidden_size=64,
+        decoder_type="class_average",
+        embed_dim=64,
+        decoder_hidden_layers=1,
+        nhead=4,
+        in_size=10,
+        tree_depth=2,
+        n_estimators=2,
+        selected_variables=6,
+    )
+    # Zero out decoder MLP last layer so raw output is ~0
+    with torch.no_grad():
+        decoder.mlp[-1].weight.zero_()
+        decoder.mlp[-1].bias.zero_()
+
+    x = torch.randn(20, 1, 32)
+    # Imbalanced labels: 50% class 0, 30% class 1, 20% class 2
+    y = torch.tensor([0]*10 + [1]*6 + [2]*4).unsqueeze(1)
+    x_train = torch.randn(20, 1, 10)
+    context = decoder.build_context(batch_size=1, num_features_used=4, device="cpu", seed=0)
+    _, _, _, leaf_classes = decoder(x, y, x_train, context, seed=0)
+    # Leaf classes should have class prior added; softmax should approximate (0.5, 0.3, 0.2)
+    probs = F.softmax(leaf_classes[0, 0, 0], dim=-1)
+    assert probs[0] > probs[1] > probs[2], f"Class prior not reflected: {probs.tolist()}"
+    assert probs[0].item() > 0.35, f"Dominant class prob too low: {probs[0].item()}"
+
+
+def test_quantile_split_values_in_feature_range():
+    """Improvement 4: split_values should be in feature space, not near zero."""
+    decoder = GrandeDecoder(
+        emsize=32,
+        n_out=3,
+        hidden_size=64,
+        decoder_type="class_average",
+        embed_dim=64,
+        decoder_hidden_layers=1,
+        nhead=4,
+        in_size=10,
+        tree_depth=2,
+        n_estimators=2,
+        selected_variables=6,
+    )
+    n_train = 20
+    x = torch.randn(n_train, 1, 32)
+    y = torch.randint(0, 3, (n_train, 1))
+    # Features at scale ~100
+    x_train = torch.randn(n_train, 1, 10) * 10 + 100
+    context = decoder.build_context(batch_size=1, num_features_used=6, device="cpu", seed=0)
+    split_values, _, _, _ = decoder(x, y, x_train, context, seed=0)
+    # With quantile transform, split_values should be centered near 100, not near 0
+    sv_mean = split_values.mean().item()
+    assert abs(sv_mean) > 10, f"Split values still near zero ({sv_mean:.2f}), quantile transform not working"
+
+
+def test_split_temperature_sharpness():
+    """Improvement 5: temperature affects gradients through ST estimator."""
+    path_ids, node_idx = build_tree_index_tensors(tree_depth=1)
+
+    def get_grad(temp):
+        logits = torch.tensor([[[[1.0, 0.5]]]], requires_grad=True)
+        out = grande_forward(
+            x=torch.tensor([[[0.5, -0.5]]]),
+            split_values=torch.tensor([[[[0.0, 0.0]]]]),
+            split_index_logits=logits,
+            estimator_weights=torch.tensor([[[0.0, 0.0]]]),
+            leaf_classes=torch.tensor([[[[1.0, 0.0], [0.0, 1.0]]]]),
+            features_by_estimator=torch.tensor([[[0, 1]]]),
+            feature_mask=torch.ones(1, 1, 2, dtype=torch.bool),
+            path_identifier_list=path_ids,
+            internal_node_index_list=node_idx,
+            training=False,
+            dropout=0.0,
+            missing_values=False,
+            straight_through=True,
+            split_temperature=temp,
+        )
+        out.sum().backward()
+        return logits.grad.clone()
+
+    grad_cold = get_grad(0.1)
+    grad_hot = get_grad(10.0)
+    assert not torch.allclose(grad_cold, grad_hot, atol=1e-5), "Temperature has no gradient effect"

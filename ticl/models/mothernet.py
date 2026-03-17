@@ -253,6 +253,7 @@ class ModelPredictor(nn.Module):
                 dropout=self.decoder.grande_dropout,
                 missing_values=self.decoder.missing_values,
                 straight_through=True,
+                split_temperature=self.decoder.split_temperature,
             )
             self._stop_grande_timer("grande_forward_s", forward_start, x.device)
             if self._grande_profile_active():
@@ -308,6 +309,7 @@ class MotherNet(ModelPredictor):
         grande_dropout=0.0,
         missing_values=True,
         grande_random_state=42,
+        split_temperature=1.0,
         grande_profile=False,
     ):
         super().__init__()
@@ -403,6 +405,7 @@ class MotherNet(ModelPredictor):
                 grande_dropout=grande_dropout,
                 missing_values=missing_values,
                 grande_random_state=grande_random_state,
+                split_temperature=split_temperature,
             )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
