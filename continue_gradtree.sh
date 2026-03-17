@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=gradtree_mothernet
-#SBATCH --partition=gpu-vram-48gb
-#SBATCH --cpus-per-task=12
+#SBATCH --partition=gpu-vram-94gb
+#SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50G
 #SBATCH --output=logs/gradtree_%j.out
