@@ -195,4 +195,6 @@ mlruns
 
 # drafts
 
-
+# autoresearch
+autoresearch_ticl/results.tsv
+autoresearch_ticl/run.log
