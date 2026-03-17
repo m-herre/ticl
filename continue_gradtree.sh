@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #SBATCH --job-name=gradtree_mothernet
-#SBATCH --partition=gpu-vram-94gb
+#SBATCH --partition=gpu-vram-48gb
 #SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
-#SBATCH --mem=70G
+#SBATCH --mem=50G
 #SBATCH --output=logs/gradtree_%j.out
 #SBATCH --error=logs/gradtree_%j.err
 #SBATCH --exclude=dws-09,dws-10
@@ -39,15 +39,29 @@ mkdir -p logs
 #     --continue-run \
 #     --warm-start-from $CHECKPOINT \
 
+# python ticl/fit_model.py mothernet \
+#     --child-model gradtree \
+#     --progress-bar False \
+#     --use-wandb \
+#     --tree-depth 4 \
+#     --n-estimators 64 \
+#     --warmup-epochs 1 \
+#     --num-steps 2048
+
 python ticl/fit_model.py mothernet \
-    --child-model gradtree \
-    --progress-bar False \
-    --use-wandb \
+    --child-model grande \
     --tree-depth 4 \
     --n-estimators 64 \
-    --warmup-epochs 1 \
-    --num-steps 2048
-
+    --selected-variables 16 \
+    --data-subset-fraction 1.0 \
+    --bootstrap False \
+    --grande-dropout 0.0 \
+    --missing-values True \
+    --num-steps 2048 \
+    --progress-bar True \
+    --use-wandb \
+    --continue-run \
+    --warm-start-from "/work/mherre/ticl/models_diff/mn_childmodelgrande_nestimators64_n2048_treedepth4_03_16_2026_19_55_25_epoch_50.cpkt"
 
 
 echo "Training completed at: $(date)"
