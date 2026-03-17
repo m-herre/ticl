@@ -771,6 +771,11 @@ class GrandeDecoder(nn.Module):
             n_layers=decoder_hidden_layers,
             activation=decoder_activation,
         )
+        # Zero-init last layer so predicted tree params start near zero,
+        # matching reference GRANDE's N(0, 0.05) "blank slate" regime.
+        with torch.no_grad():
+            self.mlp[-1].weight.zero_()
+            self.mlp[-1].bias.zero_()
 
         path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
         self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
