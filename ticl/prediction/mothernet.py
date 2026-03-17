@@ -662,7 +662,7 @@ def predict_with_grande_model(
     device = torch.device("cpu" if inference_device == "cpu" else inference_device)
     mean = torch.as_tensor(train_mean, device=device, dtype=torch.float32)
     std = torch.as_tensor(train_std, device=device, dtype=torch.float32)
-    X = torch.as_tensor(X_test, device=device, dtype=torch.float32).nan_to_num(0.0)
+    X = torch.as_tensor(X_test, device=device, dtype=torch.float32)
     if scale:
         X = (X - mean) / std
     X = torch.clamp(X, -100.0, 100.0)
