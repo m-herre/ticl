@@ -376,7 +376,6 @@ def extract_grande_model(
         "path_identifier_list": detach(model.decoder.path_identifier_list),
         "internal_node_index_list": detach(model.decoder.internal_node_index_list),
         "missing_values": model.decoder.missing_values,
-        "split_temperature": model.decoder.split_temperature,
         "feature_rescale": max_features / X_train.shape[1],
     }
 
@@ -699,7 +698,6 @@ def predict_with_grande_model(
         dropout=0.0,
         missing_values=grande_params.get("missing_values", True),
         straight_through=False,
-        split_temperature=grande_params.get("split_temperature", 1.0),
     ).squeeze(1)
 
     if logits.shape[1] == 1 and n_classes == 2:

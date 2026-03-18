@@ -726,7 +726,6 @@ class GrandeDecoder(nn.Module):
         grande_dropout=0.0,
         missing_values=True,
         grande_random_state=42,
-        split_temperature=1.0,
     ):
         super().__init__()
         self.emsize = emsize
@@ -745,7 +744,6 @@ class GrandeDecoder(nn.Module):
         self.grande_dropout = grande_dropout
         self.missing_values = missing_values
         self.grande_random_state = grande_random_state
-        self.split_temperature = split_temperature
 
         self.selected_variables = resolve_selected_variables(selected_variables, in_size)
         self.n_nodes = 2**tree_depth - 1
@@ -773,10 +771,11 @@ class GrandeDecoder(nn.Module):
             n_layers=decoder_hidden_layers,
             activation=decoder_activation,
         )
-        # Small random init for symmetry breaking across estimators.
+        # Zero-init last layer so predicted tree params start near zero,
+        # matching reference GRANDE's N(0, 0.05) "blank slate" regime.
         with torch.no_grad():
-            nn.init.normal_(self.mlp[-1].weight, mean=0.0, std=0.01)
-            nn.init.normal_(self.mlp[-1].bias, mean=0.0, std=0.01)
+            self.mlp[-1].weight.zero_()
+            self.mlp[-1].bias.zero_()
 
         path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
         self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
@@ -845,11 +844,6 @@ class GrandeDecoder(nn.Module):
         )
         offset += split_values_size
 
-        # Transform split values from z-space to feature space using feature_stats
-        feat_mean = feature_stats[..., 0]  # (batch, n_est, sel_vars)
-        feat_std = feature_stats[..., 1].clamp_min(1e-8)
-        split_values = feat_mean.unsqueeze(2) + split_values * feat_std.unsqueeze(2)
-
         split_index_size = self.n_nodes * self.selected_variables
         split_index_logits = res[:, :, offset : offset + split_index_size].view(
             batch_size,
@@ -875,18 +869,6 @@ class GrandeDecoder(nn.Module):
         offset += self.n_leaves * self.n_out
 
         assert offset == self.params_per_tree, "Mismatch in GRANDE decoder output unpacking."
-
-        # Add class prior as residual to leaf logits
-        y_long = y_src.long().clamp(0, self.n_out - 1)
-        if y_long.ndim == 1:
-            y_long = y_long.unsqueeze(1)  # (n_train,) -> (n_train, 1)
-        # y_long: (n_train, batch) -> transpose to (batch, n_train)
-        y_bt = y_long.transpose(0, 1)
-        class_counts = torch.zeros(batch_size, self.n_out, device=y_src.device, dtype=split_values.dtype)
-        class_counts.scatter_add_(1, y_bt, torch.ones_like(y_bt, dtype=split_values.dtype))
-        class_prior = class_counts / class_counts.sum(dim=-1, keepdim=True).clamp_min(1)
-        class_prior_logits = class_prior.log().clamp_min(-10)  # (batch, n_out)
-        leaf_classes = leaf_classes + class_prior_logits[:, None, None, :]
 
         if return_profile:
             return (

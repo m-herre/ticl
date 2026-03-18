@@ -280,7 +280,6 @@ def grande_forward(
     dropout=0.0,
     missing_values=True,
     straight_through=False,
-    split_temperature=1.0,
 ):
     dtype = x.dtype
     x_local = gather_estimator_features(x, features_by_estimator)
@@ -290,7 +289,7 @@ def grande_forward(
     logits = split_index_logits.masked_fill(
         ~feature_mask.unsqueeze(2), -float("inf")
     )
-    split_soft = F.softmax(logits / split_temperature, dim=-1)
+    split_soft = F.softmax(logits, dim=-1)
     split_hard = one_hot_argmax(logits, dim=-1).to(dtype)
     split_index = st(split_hard, split_soft) if straight_through else split_hard
 
@@ -316,8 +315,10 @@ def grande_forward(
         right = torch.where(masked_ext, 1.0 - smaller_prob_ext, right)
 
     path_ids = path_identifier_list.to(dtype=dtype)
-    path_factors = (1.0 - path_ids) * left + path_ids * right
-    path_probs = torch.exp(torch.sum(torch.log(path_factors.clamp_min(1e-7)), dim=-1))
+    path_probs = torch.prod(
+        ((1.0 - path_ids) * left + path_ids * right),
+        dim=-1,
+    )
 
     estimator_weights_leaf = torch.einsum(
         "bel,sbel->sbe", estimator_weights, path_probs

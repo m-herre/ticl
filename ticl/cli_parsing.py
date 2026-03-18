@@ -390,11 +390,6 @@ def argparser_from_config(parser, description="Train Mothernet"):
             help="Random seed used for deterministic GRANDE feature-subset sampling during extraction.",
         )
         mothernet.add_argument(
-            "--split-temperature",
-            type=float,
-            help="Temperature for GRANDE feature selection softmax. Lower = sharper.",
-        )
-        mothernet.add_argument(
             "--grande-profile",
             type=str2bool,
             help="Whether to record per-epoch GRANDE timing breakdowns for context, stats, decoder, and forward.",

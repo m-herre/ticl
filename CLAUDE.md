@@ -4,16 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Goal
 
-Build a **MotherNet for GRANDE**: instead of having MotherNet's transformer backbone predict MLP weights, have it predict the parameters of a GRANDE-style differentiable decision tree ensemble.
-
-The most relevant files are:
+Build a **MotherNet for GRANDE** — instead of having MotherNet's transformer backbone predict MLP weights, have it predict the parameters of a GRANDE-style differentiable decision tree ensemble. The relevant files are:
 
 - `grande.py` — standalone GRANDE implementation (reference for the tree algorithm)
-- `ticl/models/grande_core.py` — shared GRANDE context sampling, feature statistics, and tree forward kernel
+- `ticl/models/mothernet.py` — MotherNet model with `ModelPredictor` (forward/tree_forward) and `MotherNet` (architecture)
 - `ticl/models/decoders.py` — `GradTreeDecoder`, `GrandeDecoder`, and `MLPModelDecoder`
-- `ticl/models/mothernet.py` — MotherNet model with `ModelPredictor.forward()` and `MotherNet`
-- `ticl/prediction/mothernet.py` — GRANDE extraction and standalone inference helpers
-- `ticl/tests/test_grande_core.py` — focused tests for GRANDE context, stats, decoder shapes, and kernel behavior
+- `ticl/models/grande_core.py` — shared GRANDE context sampling, feature statistics, and tree forward kernel
 
 ## Architecture Overview
 
@@ -54,48 +50,9 @@ Implements Algorithm 1 from the GradTree/GRANDE paper with straight-through (ST)
 4. Leaf aggregation: einsum over path probs and leaf logits
 5. Ensemble average over estimators
 
-### GrandeDecoder (ticl/models/decoders.py:719)
-
-`GrandeDecoder` is the current MotherNet-side GRANDE implementation. It does not learn tree parameters directly as model parameters; it predicts them from the dataset representation produced by MotherNet.
-
-Per estimator, the decoder consumes:
-- A dataset-level summary from `SummaryLayer`
-- Estimator-local feature statistics from `build_grande_feature_stats()`
-- A learned estimator embedding
-
-It outputs:
-- `split_values`: `(batch, n_estimators, n_nodes, selected_variables)`
-- `split_index_logits`: `(batch, n_estimators, n_nodes, selected_variables)`
-- `estimator_weights`: `(batch, n_estimators, n_leaves)`
-- `leaf_classes`: `(batch, n_estimators, n_leaves, n_out)`
-
-Current decoder behavior that matters:
-- `features_by_estimator` and `feature_mask` come from external context built by `build_grande_context()`
-- Feature stats include per-feature mean, std, missing rate, and class-conditional means
-- The final decoder layer is initialized with small random noise for symmetry breaking across estimators
-- Raw predicted `split_values` are transformed from z-space into feature space using estimator-local mean and std
-- `leaf_classes` receive a dataset class-prior logit residual
-- When `return_profile=True`, the decoder returns timing data for feature-stat construction and the decoder MLP
-
-### grande_forward (ticl/models/grande_core.py:268)
-
-`grande_forward()` is the shared tree kernel used by both training and extracted inference.
-
-It implements a hard, axis-aligned, differentiable ensemble:
-1. Gather estimator-local features using `features_by_estimator`
-2. Apply masked softmax over `split_index_logits`, optionally temperature-scaled, then take a hard argmax
-3. Use a straight-through estimator during training to keep gradients through hard feature selection
-4. Compute node decisions with `softsign(split_value - selected_feature_value)` and hard-round them
-5. Handle missing values by routing masked splits down both branches with learned probabilities
-6. Accumulate leaf path probabilities in log space for numerical stability
-7. Use path-conditioned `estimator_weights` to softmax-weight estimators per sample
-8. Aggregate weighted leaf logits into final class logits
-
 ### GRANDE_Module (grande.py:165) — Reference
 
-Standalone GRANDE with its own learnable parameters (`split_values`, `split_index_array`, `estimator_weights`, `leaf_classes_array`).
-
-Key reference properties:
+Standalone GRANDE with its own learnable parameters (split_values, split_index_array, estimator_weights, leaf_classes_array). Key differences from the MotherNet GradTree version:
 - Has per-estimator feature subset selection (`features_by_estimator`)
 - Uses per-estimator learned weights for weighted aggregation (softmax over `estimator_weights`)
 - Supports data subsetting per estimator (`data_subset_fraction`, `bootstrap`)
@@ -105,7 +62,7 @@ Key reference properties:
 
 ### SummaryLayer (ticl/models/decoders.py:285)
 
-Shared between `MLPModelDecoder`, `GradTreeDecoder`, and `GrandeDecoder`. Converts per-sample transformer output into a fixed-size dataset-level summary. Supports multiple `decoder_type` strategies: `output_attention` (default, uses cross-attention with learned query), `special_token`, `class_tokens`, `class_average`, `average`.
+Shared between MLPModelDecoder and GradTreeDecoder. Converts per-sample transformer output into a fixed-size dataset-level summary. Supports multiple `decoder_type` strategies: `output_attention` (default, uses cross-attention with learned query), `special_token`, `class_tokens`, `class_average`, `average`.
 
 ## Commands
 
@@ -119,9 +76,6 @@ python ticl/fit_model.py mothernet
 # Train MotherNet (GradTree child)
 python ticl/fit_model.py mothernet --child-model gradtree --tree-depth 5 --n-estimators 10
 
-# Train MotherNet (GRANDE child)
-python ticl/fit_model.py mothernet --child-model grande --tree-depth 4 --n-estimators 64
-
 # Specify GPU
 python ticl/fit_model.py mothernet -g 0
 
@@ -131,21 +85,7 @@ python ticl/fit_model.py mothernet -h
 
 ## Key Config (ticl/model_configs.py)
 
-MotherNet defaults include `child_model: "mlp"`, `tree_depth: 5`, `n_estimators: 1`. Override via CLI args. For the GRANDE path, the main config knobs are:
-
-- `--child-model grande`
-- `--tree-depth`
-- `--n-estimators`
-- `--selected-variables`
-- `--data-subset-fraction`
-- `--bootstrap`
-- `--grande-dropout`
-- `--missing-values`
-- `--grande-random-state`
-- `--split-temperature`
-- `--grande-profile`
-
-Config is parsed in `ticl/cli_parsing.py` and defaulted in `ticl/model_configs.py`.
+MotherNet defaults include `child_model: "mlp"`, `tree_depth: 5`, `n_estimators: 1`. Override via CLI args (`--child-model`, `--tree-depth`, `--n-estimators`). Config is parsed in `ticl/cli_parsing.py`.
 
 ## Tensor Conventions
 
@@ -153,7 +93,6 @@ Config is parsed in `ticl/cli_parsing.py` and defaulted in `ticl/model_configs.p
 - `x` input: `(n_samples, batch, n_features)`, split at `single_eval_pos` into train/test
 - `info` dict may contain `num_features_used` for masking padded features in tree inference
 - Decoders output per-batch parameters; test inference is vectorized over `n_test` samples
-- Extracted GRANDE models squeeze the training batch dimension and store `(n_estimators, ...)` tensors for standalone inference
 
 ## GradTree Code Paths — Keep In Sync
 
@@ -165,22 +104,9 @@ The GradTree child model has **three code paths** that must stay consistent when
 
 Any change to decoder output shapes (in `ticl/models/decoders.py` → `GradTreeDecoder`) must be propagated to all three.
 
-## GRANDE Code Paths — Keep In Sync
+## Current Simplifications Vs `grande.py`
 
-The GRANDE child model also has **three code paths**:
-
-1. **Training forward**: `ticl/models/mothernet.py` → grande branch in `ModelPredictor.forward()`
-2. **Parameter extraction**: `ticl/prediction/mothernet.py` → `extract_grande_model()`
-3. **Standalone inference**: `ticl/prediction/mothernet.py` → `predict_with_grande_model()`
-
-Important details:
-- `grande_forward()` is shared across training and standalone inference, so kernel changes usually propagate automatically
-- Changes to decoder output names, shapes, normalization, or metadata still must be reflected in extraction and standalone inference
-- `features_by_estimator`, `feature_mask`, `path_identifier_list`, `internal_node_index_list`, `missing_values`, `split_temperature`, and `feature_rescale` are part of the extracted model contract
-
-## Legacy GradTree Vs GRANDE
-
-These notes apply to the legacy `child_model="gradtree"` path. The newer `child_model="grande"` path is the actual GRANDE-style integration and uses `ticl/models/grande_core.py`.
+These notes apply to the legacy `child_model="gradtree"` path. The new `child_model="grande"` path is the closer GRANDE integration and uses `ticl/models/grande_core.py`.
 
 - **Estimator aggregation**: MotherNet averages estimator logits uniformly. `grande.py` uses instance-dependent softmax weights derived from `estimator_weights` and the active leaf per estimator, with optional dropout.
 - **Missing values**: MotherNet currently zero-imputes NaNs before tree evaluation. `grande.py` has nan-aware routing that sends masked splits down both branches with learned probabilities.
@@ -200,27 +126,9 @@ When comparing outputs against `grande.py`, do not assume parity unless these ga
 
 ## GRANDE Path Notes
 
-- `child_model="grande"` is the end-to-end GRANDE-style path that produces a hard, axis-aligned differentiable tree ensemble.
-- `selected_variables` is a fixed estimator-local feature budget. If the configured value is `<= 1`, it is interpreted as a fraction of max features and clamped into the GRANDE-style min/max range in `resolve_selected_variables()`.
-- `GrandeDecoder` does **not** predict `features_by_estimator`; they are sampled externally via `build_grande_context()` and must be carried through extraction and inference.
-- Training currently builds GRANDE context in the forward pass without an explicit seed. Extraction uses `grande_random_state` to freeze one deterministic context draw.
-- `build_grande_feature_stats()` computes estimator-local feature summaries, and optional row subsampling or bootstrap only affects those summaries.
-- `predict_with_grande_model()` preserves NaNs so the shared kernel can use `missing_values=True` routing at inference time.
-- Extracted inference multiplies normalized features by `feature_rescale = max_features / X_train.shape[1]` to match the padded-feature representation seen during extraction.
-- Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized.
+- `child_model="grande"` is the end-to-end GRANDE-style path. It uses a fixed estimator-local feature budget (`selected_variables`) instead of predicting over the full padded feature axis.
+- `GrandeDecoder` does **not** predict `features_by_estimator`. Those feature subsets are sampled externally via `build_grande_context()` and must be carried through extraction/inference.
+- The GRANDE path uses one shared torch kernel (`grande_forward`) for training forward and extracted inference. Avoid reintroducing separate numpy/CUDA implementations unless there is a strong reason.
+- Row subsampling / bootstrap affect the estimator-local feature statistics used by `GrandeDecoder`, not the inference-time tree kernel directly.
+- Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized; avoid reintroducing Python loops over `batch_size * n_estimators`.
 - Use `--grande-profile True` when investigating runtime. It records epoch-level timings for `grande_context_s`, `grande_feature_stats_s`, `grande_decoder_mlp_s`, and `grande_forward_s`.
-
-## Concerns And Deviations From Original GRANDE
-
-- **Deviation**: The MotherNet GRANDE path is a hypernetwork-predicted tree ensemble. Unlike `grande.py`, the tree parameters are not direct `nn.Parameter`s trained with separate optimizer groups and learning rates.
-- **Deviation**: `features_by_estimator` are not persistent model parameters in the MotherNet path. They are sampled outside the decoder via `build_grande_context()`.
-- **Deviation**: During training, estimator feature subsets are currently resampled per forward unless a seed is explicitly passed. During extraction, `grande_random_state` freezes a single deterministic draw.
-- **Deviation**: Decoder `split_values` are not used as raw learned thresholds. They are predicted in z-space and then mapped into estimator-local feature space using mean and std.
-- **Deviation**: Decoder `leaf_classes` receive a dataset class-prior residual before tree aggregation.
-- **Deviation**: Path probabilities are accumulated in log space for stability instead of plain `torch.prod`.
-- **Deviation**: `data_subset_fraction` and `bootstrap` affect the estimator-local feature statistics passed into the decoder, not the inference-time tree kernel structure itself.
-- **Concern**: `build_grande_context()` is performance-sensitive and device-sensitive. If you change it, verify CPU and CUDA assignment semantics carefully.
-- **Concern**: Extracted GRANDE inference still inherits MotherNet's prior/config limits, including the padded feature cap from `config["prior"]["num_features"]`.
-- **Concern**: Benchmark parity with reference GRANDE or with CART should not be assumed from architecture alone; benchmark notebooks currently include mixed results and some dataset failures.
-
-When comparing against `grande.py`, treat the current `child_model="grande"` path as a close GRANDE-style implementation, not an exact reproduction.
