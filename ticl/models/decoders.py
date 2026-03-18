@@ -877,9 +877,13 @@ class GrandeDecoder(nn.Module):
         assert offset == self.params_per_tree, "Mismatch in GRANDE decoder output unpacking."
 
         # Add class prior as residual to leaf logits
-        y_long = y_src.long().clamp(0, self.n_out - 1)  # (n_train, batch)
+        y_long = y_src.long().clamp(0, self.n_out - 1)
+        if y_long.ndim == 1:
+            y_long = y_long.unsqueeze(1)  # (n_train,) -> (n_train, 1)
+        # y_long: (n_train, batch) -> transpose to (batch, n_train)
+        y_bt = y_long.transpose(0, 1)
         class_counts = torch.zeros(batch_size, self.n_out, device=y_src.device, dtype=split_values.dtype)
-        class_counts.scatter_add_(1, y_long.T, torch.ones_like(y_long.T, dtype=split_values.dtype))
+        class_counts.scatter_add_(1, y_bt, torch.ones_like(y_bt, dtype=split_values.dtype))
         class_prior = class_counts / class_counts.sum(dim=-1, keepdim=True).clamp_min(1)
         class_prior_logits = class_prior.log().clamp_min(-10)  # (batch, n_out)
         leaf_classes = leaf_classes + class_prior_logits[:, None, None, :]
