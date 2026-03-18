@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import os
 import random
 import shutil
@@ -396,6 +397,20 @@ def get_model_string(config, num_gpus, device, parser):
         with open(f"{config['orchestration']['st_checkpoint_dir']}/model_string.txt", 'w') as f:
             f.write(model_string)
     return model_string
+
+
+def get_wandb_run_string(model_string, max_length=128):
+    if max_length <= 0:
+        raise ValueError("max_length must be positive")
+    if len(model_string) <= max_length:
+        return model_string
+
+    digest = hashlib.sha1(model_string.encode("utf-8")).hexdigest()[:12]
+    if max_length <= len(digest) + 1:
+        return digest[:max_length]
+
+    prefix_len = max_length - len(digest) - 1
+    return f"{model_string[:prefix_len]}_{digest}"
 
 
 def make_training_callback(

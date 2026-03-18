@@ -2,13 +2,16 @@ import time
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 
 from ticl.models.grande_core import (
     build_grande_context,
     build_grande_feature_stats,
     build_tree_index_tensors,
+    one_hot_argmax,
     resolve_selected_variables,
+    st,
 )
 
 
@@ -728,6 +731,9 @@ class GrandeDecoder(nn.Module):
         grande_random_state=42,
         grande_decoder_variant="baseline",
         grande_output_init="default",
+        grande_split_temperature_start=1.0,
+        grande_split_temperature_end=1.0,
+        grande_split_temperature_anneal_steps=0,
     ):
         super().__init__()
         self.emsize = emsize
@@ -748,7 +754,16 @@ class GrandeDecoder(nn.Module):
         self.grande_random_state = grande_random_state
         self.grande_decoder_variant = grande_decoder_variant
         self.grande_output_init = grande_output_init
-        if self.grande_decoder_variant not in {"baseline", "factorized_stats"}:
+        self.grande_split_temperature_start = float(grande_split_temperature_start)
+        self.grande_split_temperature_end = float(grande_split_temperature_end)
+        self.grande_split_temperature_anneal_steps = int(
+            grande_split_temperature_anneal_steps
+        )
+        if self.grande_decoder_variant not in {
+            "baseline",
+            "factorized_stats",
+            "depthwise_factorized_stats",
+        }:
             raise ValueError(
                 f"Unknown grande_decoder_variant: {self.grande_decoder_variant}"
             )
@@ -756,6 +771,12 @@ class GrandeDecoder(nn.Module):
             raise ValueError(
                 f"Unknown grande_output_init: {self.grande_output_init}"
             )
+        if self.grande_split_temperature_start <= 0.0:
+            raise ValueError("grande_split_temperature_start must be positive")
+        if self.grande_split_temperature_end <= 0.0:
+            raise ValueError("grande_split_temperature_end must be positive")
+        if self.grande_split_temperature_anneal_steps < 0:
+            raise ValueError("grande_split_temperature_anneal_steps must be non-negative")
 
         self.selected_variables = resolve_selected_variables(selected_variables, in_size)
         self.n_nodes = 2**tree_depth - 1
@@ -780,6 +801,11 @@ class GrandeDecoder(nn.Module):
             nhead=nhead,
         )
         self.estimator_embedding = nn.Embedding(n_estimators, hidden_size)
+        self.register_buffer(
+            "split_temperature_step",
+            torch.zeros((), dtype=torch.long),
+            persistent=True,
+        )
         mlp_in_size = (
             self.summary_layer.out_size
             + self.selected_variables * self.stats_dim
@@ -794,7 +820,7 @@ class GrandeDecoder(nn.Module):
                 activation=decoder_activation,
             )
             self._init_output_projection(self.mlp[-1], baseline=True)
-        else:
+        elif self.grande_decoder_variant == "factorized_stats":
             self.split_value_head = make_decoder_mlp(
                 mlp_in_size,
                 hidden_size,
@@ -830,6 +856,50 @@ class GrandeDecoder(nn.Module):
                 self.leaf_head,
             ):
                 self._init_output_projection(head[-1], baseline=False)
+        else:
+            self.depthwise_state_init = nn.Linear(mlp_in_size, hidden_size)
+            self.depthwise_context_proj = nn.Linear(mlp_in_size, hidden_size)
+            self.depth_embedding = nn.Embedding(self.tree_depth, hidden_size)
+            self.branch_embedding = nn.Embedding(2, hidden_size)
+            self.depthwise_split_value_head = make_decoder_mlp(
+                3 * hidden_size,
+                hidden_size,
+                self.selected_variables,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.depthwise_split_index_head = make_decoder_mlp(
+                3 * hidden_size,
+                hidden_size,
+                self.selected_variables,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.depthwise_state_cell = nn.GRUCell(
+                input_size=3 * hidden_size + self.stats_dim + 1,
+                hidden_size=hidden_size,
+            )
+            self.estimator_weight_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.estimator_weights_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.leaf_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.leaf_classes_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            for head in (
+                self.depthwise_split_value_head,
+                self.depthwise_split_index_head,
+                self.estimator_weight_head,
+                self.leaf_head,
+            ):
+                self._init_output_projection(head[-1], baseline=False)
 
         path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
         self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
@@ -849,6 +919,190 @@ class GrandeDecoder(nn.Module):
             with torch.no_grad():
                 nn.init.normal_(layer.weight, mean=0.0, std=0.05)
                 nn.init.normal_(layer.bias, mean=0.0, std=0.05)
+
+    def _current_split_temperature(self, device):
+        if not self.training:
+            temperature = self.grande_split_temperature_end
+        elif (
+            self.grande_split_temperature_anneal_steps <= 0
+            or self.grande_split_temperature_start
+            == self.grande_split_temperature_end
+        ):
+            temperature = self.grande_split_temperature_end
+        else:
+            progress = min(
+                float(self.split_temperature_step.item())
+                / float(self.grande_split_temperature_anneal_steps),
+                1.0,
+            )
+            temperature = self.grande_split_temperature_start + progress * (
+                self.grande_split_temperature_end - self.grande_split_temperature_start
+            )
+            self.split_temperature_step.add_(1)
+        return torch.tensor(temperature, device=device, dtype=torch.float32)
+
+    def _decode_factorized_stats(
+        self, decoder_input_flat, *, batch_size, feature_stats
+    ):
+        split_value_delta = self.split_value_head(decoder_input_flat)
+        split_index_logits = self.split_index_head(decoder_input_flat)
+        estimator_weights = self.estimator_weight_head(decoder_input_flat)
+        leaf_classes = self.leaf_head(decoder_input_flat)
+
+        delta = split_value_delta.view(
+            batch_size,
+            self.n_estimators,
+            self.n_nodes,
+            self.selected_variables,
+        )
+        mu = feature_stats[..., 0].unsqueeze(2)
+        sigma = feature_stats[..., 1].clamp_min(1e-3).unsqueeze(2)
+        split_values = mu + delta * sigma
+        split_index_logits = split_index_logits.view(
+            batch_size,
+            self.n_estimators,
+            self.n_nodes,
+            self.selected_variables,
+        )
+        estimator_weights = estimator_weights.view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+        )
+        leaf_classes = leaf_classes.view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+            self.n_out,
+        )
+        return split_values, split_index_logits, estimator_weights, leaf_classes
+
+    def _decode_depthwise_factorized_stats(
+        self, decoder_input_flat, *, batch_size, feature_stats, dtype, device
+    ):
+        base_context = torch.tanh(self.depthwise_context_proj(decoder_input_flat)).view(
+            batch_size, self.n_estimators, self.hidden_size
+        )
+        current_states = torch.tanh(self.depthwise_state_init(decoder_input_flat)).view(
+            batch_size, self.n_estimators, 1, self.hidden_size
+        )
+        estimator_weights = self.estimator_weight_head(decoder_input_flat).view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+        )
+        leaf_classes = self.leaf_head(decoder_input_flat).view(
+            batch_size,
+            self.n_estimators,
+            self.n_leaves,
+            self.n_out,
+        )
+
+        mu = feature_stats[..., 0]
+        sigma = feature_stats[..., 1].clamp_min(1e-3)
+        split_temperature = self._current_split_temperature(device=device)
+
+        split_value_levels = []
+        split_index_levels = []
+        branch_index = torch.arange(2, device=device, dtype=torch.long)
+
+        for depth in range(self.tree_depth):
+            nodes_at_depth = current_states.shape[2]
+            depth_emb = self.depth_embedding.weight[depth].view(
+                1, 1, 1, self.hidden_size
+            )
+            depth_emb = depth_emb.expand(batch_size, self.n_estimators, nodes_at_depth, -1)
+            base_context_expanded = base_context.unsqueeze(2).expand(
+                batch_size, self.n_estimators, nodes_at_depth, -1
+            )
+            head_input = torch.cat(
+                [current_states, base_context_expanded, depth_emb], dim=-1
+            )
+            head_input_flat = head_input.reshape(
+                batch_size * self.n_estimators * nodes_at_depth, -1
+            )
+
+            delta = self.depthwise_split_value_head(head_input_flat).view(
+                batch_size,
+                self.n_estimators,
+                nodes_at_depth,
+                self.selected_variables,
+            )
+            raw_split_logits = self.depthwise_split_index_head(head_input_flat).view(
+                batch_size,
+                self.n_estimators,
+                nodes_at_depth,
+                self.selected_variables,
+            )
+            split_logits = raw_split_logits / split_temperature
+            split_values = (
+                mu.unsqueeze(2).expand_as(delta) + delta * sigma.unsqueeze(2).expand_as(delta)
+            )
+
+            split_soft = F.softmax(split_logits, dim=-1)
+            split_hard = one_hot_argmax(split_logits, dim=-1).to(dtype=dtype)
+            split_choice = st(split_hard, split_soft)
+            selected_stats = torch.einsum(
+                "benk,bekd->bend", split_choice, feature_stats
+            )
+            selected_threshold = torch.einsum(
+                "benk,benk->ben", split_choice, split_values
+            ).unsqueeze(-1)
+
+            split_value_levels.append(split_values)
+            split_index_levels.append(split_logits)
+
+            if depth == self.tree_depth - 1:
+                continue
+
+            selected_stats = selected_stats.unsqueeze(3).expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, self.stats_dim
+            )
+            selected_threshold = selected_threshold.unsqueeze(3).expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, 1
+            )
+            next_depth_emb = self.depth_embedding.weight[depth + 1].view(
+                1, 1, 1, 1, self.hidden_size
+            )
+            next_depth_emb = next_depth_emb.expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, -1
+            )
+            base_context_children = base_context_expanded.unsqueeze(3).expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, self.hidden_size
+            )
+            branch_emb = self.branch_embedding(branch_index).view(
+                1, 1, 1, 2, self.hidden_size
+            )
+            branch_emb = branch_emb.expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, -1
+            )
+            gru_input = torch.cat(
+                [
+                    base_context_children,
+                    next_depth_emb,
+                    branch_emb,
+                    selected_stats,
+                    selected_threshold,
+                ],
+                dim=-1,
+            )
+            parent_hidden = current_states.unsqueeze(3).expand(
+                batch_size, self.n_estimators, nodes_at_depth, 2, self.hidden_size
+            )
+            child_states = self.depthwise_state_cell(
+                gru_input.reshape(-1, gru_input.shape[-1]),
+                parent_hidden.reshape(-1, self.hidden_size),
+            )
+            current_states = child_states.view(
+                batch_size,
+                self.n_estimators,
+                nodes_at_depth * 2,
+                self.hidden_size,
+            )
+
+        split_values = torch.cat(split_value_levels, dim=2)
+        split_index_logits = torch.cat(split_index_levels, dim=2)
+        return split_values, split_index_logits, estimator_weights, leaf_classes
 
     def build_context(self, *, batch_size, num_features_used, device, seed=None):
         return build_grande_context(
@@ -897,11 +1151,6 @@ class GrandeDecoder(nn.Module):
         decoder_input_flat = decoder_input.reshape(batch_size * self.n_estimators, -1)
         if self.grande_decoder_variant == "baseline":
             res = self.mlp(decoder_input_flat)
-        else:
-            split_value_delta = self.split_value_head(decoder_input_flat)
-            split_index_logits = self.split_index_head(decoder_input_flat)
-            estimator_weights = self.estimator_weight_head(decoder_input_flat)
-            leaf_classes = self.leaf_head(decoder_input_flat)
         if return_profile:
             if x.device.type == "cuda":
                 torch.cuda.synchronize(x.device)
@@ -948,32 +1197,23 @@ class GrandeDecoder(nn.Module):
             assert (
                 offset == self.params_per_tree
             ), "Mismatch in GRANDE decoder output unpacking."
+        elif self.grande_decoder_variant == "factorized_stats":
+            split_values, split_index_logits, estimator_weights, leaf_classes = (
+                self._decode_factorized_stats(
+                    decoder_input_flat,
+                    batch_size=batch_size,
+                    feature_stats=feature_stats,
+                )
+            )
         else:
-            delta = split_value_delta.view(
-                batch_size,
-                self.n_estimators,
-                self.n_nodes,
-                self.selected_variables,
-            )
-            mu = feature_stats[..., 0].unsqueeze(2)
-            sigma = feature_stats[..., 1].clamp_min(1e-3).unsqueeze(2)
-            split_values = mu + delta * sigma
-            split_index_logits = split_index_logits.view(
-                batch_size,
-                self.n_estimators,
-                self.n_nodes,
-                self.selected_variables,
-            )
-            estimator_weights = estimator_weights.view(
-                batch_size,
-                self.n_estimators,
-                self.n_leaves,
-            )
-            leaf_classes = leaf_classes.view(
-                batch_size,
-                self.n_estimators,
-                self.n_leaves,
-                self.n_out,
+            split_values, split_index_logits, estimator_weights, leaf_classes = (
+                self._decode_depthwise_factorized_stats(
+                    decoder_input_flat,
+                    batch_size=batch_size,
+                    feature_stats=feature_stats,
+                    dtype=x.dtype,
+                    device=x.device,
+                )
             )
 
         if return_profile:

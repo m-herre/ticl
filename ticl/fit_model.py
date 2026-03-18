@@ -14,7 +14,13 @@ root_dir = os.path.dirname(os.path.abspath(__file__))
 from git import Repo
 
 from ticl.model_builder import get_model
-from ticl.utils import init_device, get_model_string, synetune_handle_checkpoint, make_training_callback
+from ticl.utils import (
+    init_device,
+    get_model_string,
+    get_wandb_run_string,
+    synetune_handle_checkpoint,
+    make_training_callback,
+)
 from ticl.config_utils import compare_dicts, flatten_dict, update_config
 from ticl.cli_parsing import make_model_level_argparser
 from ticl.model_configs import get_model_default_config
@@ -136,6 +142,8 @@ def main(argv, extra_config=None):
         from ticl.environment import WANDB_INFO
         wandb_data, flatten_key_dict = flatten_dict(config, track_keys=True)
         wandb_config = {k: v for k, v in wandb_data.items() if k not in ['wallclock_times', 'losses', 'learning_rates']}
+        wandb_config["full_model_string"] = model_string
+        wandb_run_string = get_wandb_run_string(model_string)
         # check_keys = pd.read_csv(f"{root_dir}/configs/{args.model_type}_configs.csv").columns
         # flatten_check_keys = [flatten_key_dict[k] for k in check_keys] + ['model_type']
 
@@ -175,7 +183,8 @@ def main(argv, extra_config=None):
             dir=WANDB_INFO['dir'],
             project=WANDB_INFO['project'],
             entity=WANDB_INFO['entity'],
-            id=model_string,
+            id=wandb_run_string,
+            name=wandb_run_string,
             config=wandb_config,
         )
 

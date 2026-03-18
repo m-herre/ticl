@@ -120,7 +120,7 @@ def test_grande_forward_routes_samples_to_expected_leaf():
 @torch.no_grad()
 @torch.inference_mode()
 def test_grande_decoder_outputs_expected_shapes():
-    for variant in ("baseline", "factorized_stats"):
+    for variant in ("baseline", "factorized_stats", "depthwise_factorized_stats"):
         decoder = GrandeDecoder(
             emsize=32,
             n_out=3,
@@ -162,62 +162,107 @@ def test_grande_decoder_outputs_expected_shapes():
 @torch.no_grad()
 @torch.inference_mode()
 def test_factorized_grande_decoder_zero_delta_reduces_to_feature_means():
-    decoder = GrandeDecoder(
-        emsize=32,
-        n_out=3,
-        hidden_size=64,
-        decoder_type="class_average",
-        embed_dim=64,
-        decoder_hidden_layers=1,
-        nhead=4,
-        in_size=10,
-        tree_depth=2,
-        n_estimators=4,
-        selected_variables=6,
-        grande_decoder_variant="factorized_stats",
-        grande_output_init="default",
-    )
-    for parameter in decoder.split_value_head.parameters():
-        parameter.zero_()
+    for variant in ("factorized_stats", "depthwise_factorized_stats"):
+        decoder = GrandeDecoder(
+            emsize=32,
+            n_out=3,
+            hidden_size=64,
+            decoder_type="class_average",
+            embed_dim=64,
+            decoder_hidden_layers=1,
+            nhead=4,
+            in_size=10,
+            tree_depth=2,
+            n_estimators=4,
+            selected_variables=6,
+            grande_decoder_variant=variant,
+            grande_output_init="default",
+        )
+        if variant == "factorized_stats":
+            for parameter in decoder.split_value_head.parameters():
+                parameter.zero_()
+        else:
+            for parameter in decoder.depthwise_split_value_head.parameters():
+                parameter.zero_()
 
-    x = torch.randn(5, 2, 32)
-    y = torch.randint(0, 3, (5, 2))
-    x_train = torch.randn(5, 2, 10)
-    context = decoder.build_context(
-        batch_size=2,
-        num_features_used=4,
-        device=x.device,
-        seed=0,
-    )
-    split_values, split_index_logits, estimator_weights, leaf_classes = decoder(
-        x,
-        y,
-        x_train,
-        context,
-        seed=0,
-    )
-    feature_stats = build_grande_feature_stats(
-        x_train=x_train,
-        y_train=y,
-        features_by_estimator=context["features_by_estimator"],
-        feature_mask=context["feature_mask"],
-        n_out=decoder.n_out,
-        data_subset_fraction=decoder.data_subset_fraction,
-        bootstrap=decoder.bootstrap,
-        seed=0,
-    )
-    expected_split_values = feature_stats[..., 0].unsqueeze(2).expand_as(split_values)
+        x = torch.randn(5, 2, 32)
+        y = torch.randint(0, 3, (5, 2))
+        x_train = torch.randn(5, 2, 10)
+        context = decoder.build_context(
+            batch_size=2,
+            num_features_used=4,
+            device=x.device,
+            seed=0,
+        )
+        split_values, split_index_logits, estimator_weights, leaf_classes = decoder(
+            x,
+            y,
+            x_train,
+            context,
+            seed=0,
+        )
+        feature_stats = build_grande_feature_stats(
+            x_train=x_train,
+            y_train=y,
+            features_by_estimator=context["features_by_estimator"],
+            feature_mask=context["feature_mask"],
+            n_out=decoder.n_out,
+            data_subset_fraction=decoder.data_subset_fraction,
+            bootstrap=decoder.bootstrap,
+            seed=0,
+        )
+        expected_split_values = feature_stats[..., 0].unsqueeze(2).expand_as(
+            split_values
+        )
 
-    assert split_values.shape == (2, 4, 3, 6)
-    assert split_index_logits.shape == (2, 4, 3, 6)
-    assert estimator_weights.shape == (2, 4, 4)
-    assert leaf_classes.shape == (2, 4, 4, 3)
-    assert torch.allclose(split_values, expected_split_values, atol=1e-6)
+        assert split_values.shape == (2, 4, 3, 6)
+        assert split_index_logits.shape == (2, 4, 3, 6)
+        assert estimator_weights.shape == (2, 4, 4)
+        assert leaf_classes.shape == (2, 4, 4, 3)
+        assert torch.allclose(split_values, expected_split_values, atol=1e-6)
 
 
 @torch.no_grad()
 @torch.inference_mode()
 def test_factorized_grande_decoder_default_init_emits_non_zero_outputs():
+    for variant in ("factorized_stats", "depthwise_factorized_stats"):
+        decoder = GrandeDecoder(
+            emsize=32,
+            n_out=3,
+            hidden_size=64,
+            decoder_type="class_average",
+            embed_dim=64,
+            decoder_hidden_layers=1,
+            nhead=4,
+            in_size=10,
+            tree_depth=2,
+            n_estimators=4,
+            selected_variables=6,
+            grande_decoder_variant=variant,
+            grande_output_init="default",
+        )
+        x = torch.randn(5, 2, 32)
+        y = torch.randint(0, 3, (5, 2))
+        x_train = torch.randn(5, 2, 10)
+        context = decoder.build_context(
+            batch_size=2,
+            num_features_used=4,
+            device=x.device,
+            seed=0,
+        )
+        outputs = decoder(
+            x,
+            y,
+            x_train,
+            context,
+            seed=0,
+        )
+        assert any(output.abs().sum().item() > 0 for output in outputs)
+
+
+@torch.no_grad()
+@torch.inference_mode()
+def test_depthwise_grande_decoder_tracks_temperature_steps_during_training():
     decoder = GrandeDecoder(
         emsize=32,
         n_out=3,
@@ -230,9 +275,13 @@ def test_factorized_grande_decoder_default_init_emits_non_zero_outputs():
         tree_depth=2,
         n_estimators=4,
         selected_variables=6,
-        grande_decoder_variant="factorized_stats",
+        grande_decoder_variant="depthwise_factorized_stats",
         grande_output_init="default",
+        grande_split_temperature_start=2.0,
+        grande_split_temperature_end=1.0,
+        grande_split_temperature_anneal_steps=4,
     )
+    decoder.train()
     x = torch.randn(5, 2, 32)
     y = torch.randint(0, 3, (5, 2))
     x_train = torch.randn(5, 2, 10)
@@ -242,14 +291,21 @@ def test_factorized_grande_decoder_default_init_emits_non_zero_outputs():
         device=x.device,
         seed=0,
     )
-    outputs = decoder(
+    decoder(
         x,
         y,
         x_train,
         context,
         seed=0,
     )
-    assert any(output.abs().sum().item() > 0 for output in outputs)
+    decoder(
+        x,
+        y,
+        x_train,
+        context,
+        seed=0,
+    )
+    assert decoder.split_temperature_step.item() == 2
 
 
 def test_build_grande_feature_stats_matches_reference_implementation():
@@ -298,73 +354,77 @@ def test_grande_extract_and_predict_smoke():
     torch.manual_seed(0)
     np.random.seed(0)
 
-    model = MotherNet(
-        n_out=3,
-        emsize=16,
-        nhead=4,
-        nhid_factor=2,
-        nlayers=1,
-        n_features=10,
-        child_model="grande",
-        decoder_type="average",
-        decoder_hidden_layers=1,
-        decoder_hidden_size=32,
-        y_encoder_layer=None,
-        tabpfn_zero_weights=False,
-        tree_depth=2,
-        n_estimators=3,
-        selected_variables=4,
-        grande_decoder_variant="factorized_stats",
-        grande_output_init="default",
-    )
-    model.eval()
-    config = {
-        "prior": {"num_features": 10},
-        "mothernet": {"grande_random_state": 7},
-    }
-    x_train = np.array(
-        [
-            [0.1, -1.0, 0.3, 1.2],
-            [0.4, -0.5, -0.2, 0.9],
-            [1.0, 0.2, 0.5, -0.4],
-            [-0.3, 0.7, -0.8, 0.1],
-            [0.6, -0.1, 1.1, -0.7],
-            [0.2, 0.4, -0.6, 0.5],
-        ],
-        dtype=float,
-    )
-    y_train = np.array([0, 1, 2, 1, 0, 2], dtype=int)
-    x_test = np.array(
-        [
-            [0.3, -0.2, 0.4, 0.8],
-            [-0.1, 0.5, -0.7, 0.0],
-            [0.9, 0.1, 0.2, -0.5],
-        ],
-        dtype=float,
-    )
+    for variant in ("factorized_stats", "depthwise_factorized_stats"):
+        model = MotherNet(
+            n_out=3,
+            emsize=16,
+            nhead=4,
+            nhid_factor=2,
+            nlayers=1,
+            n_features=10,
+            child_model="grande",
+            decoder_type="average",
+            decoder_hidden_layers=1,
+            decoder_hidden_size=32,
+            y_encoder_layer=None,
+            tabpfn_zero_weights=False,
+            tree_depth=2,
+            n_estimators=3,
+            selected_variables=4,
+            grande_decoder_variant=variant,
+            grande_output_init="default",
+            grande_split_temperature_start=1.0,
+            grande_split_temperature_end=0.5,
+            grande_split_temperature_anneal_steps=4,
+        )
+        model.eval()
+        config = {
+            "prior": {"num_features": 10},
+            "mothernet": {"grande_random_state": 7},
+        }
+        x_train = np.array(
+            [
+                [0.1, -1.0, 0.3, 1.2],
+                [0.4, -0.5, -0.2, 0.9],
+                [1.0, 0.2, 0.5, -0.4],
+                [-0.3, 0.7, -0.8, 0.1],
+                [0.6, -0.1, 1.1, -0.7],
+                [0.2, 0.4, -0.6, 0.5],
+            ],
+            dtype=float,
+        )
+        y_train = np.array([0, 1, 2, 1, 0, 2], dtype=int)
+        x_test = np.array(
+            [
+                [0.3, -0.2, 0.4, 0.8],
+                [-0.1, 0.5, -0.7, 0.0],
+                [0.9, 0.1, 0.2, -0.5],
+            ],
+            dtype=float,
+        )
 
-    grande_params = extract_grande_model(
-        model,
-        config,
-        x_train,
-        y_train,
-        device="cpu",
-        inference_device="cpu",
-        scale=True,
-    )
-    train_mean = np.nan_to_num(np.nanmean(x_train, axis=0), 0.0)
-    train_std = np.nanstd(x_train, axis=0, ddof=1) + 0.000001
-    train_std[np.isnan(train_std)] = 1.0
-    probs = predict_with_grande_model(
-        train_mean,
-        train_std,
-        x_test,
-        grande_params,
-        scale=True,
-        inference_device="cpu",
-        n_classes=3,
-    )
+        grande_params = extract_grande_model(
+            model,
+            config,
+            x_train,
+            y_train,
+            device="cpu",
+            inference_device="cpu",
+            scale=True,
+        )
+        train_mean = np.nan_to_num(np.nanmean(x_train, axis=0), 0.0)
+        train_std = np.nanstd(x_train, axis=0, ddof=1) + 0.000001
+        train_std[np.isnan(train_std)] = 1.0
+        probs = predict_with_grande_model(
+            train_mean,
+            train_std,
+            x_test,
+            grande_params,
+            scale=True,
+            inference_device="cpu",
+            n_classes=3,
+        )
 
-    assert probs.shape == (3, 3)
-    assert np.all(np.isfinite(probs))
-    assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-6)
+        assert probs.shape == (3, 3)
+        assert np.all(np.isfinite(probs))
+        assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-6)

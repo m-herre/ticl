@@ -310,6 +310,9 @@ class MotherNet(ModelPredictor):
         grande_random_state=42,
         grande_decoder_variant="baseline",
         grande_output_init="default",
+        grande_split_temperature_start=1.0,
+        grande_split_temperature_end=1.0,
+        grande_split_temperature_anneal_steps=0,
         grande_profile=False,
     ):
         super().__init__()
@@ -407,6 +410,9 @@ class MotherNet(ModelPredictor):
                 grande_random_state=grande_random_state,
                 grande_decoder_variant=grande_decoder_variant,
                 grande_output_init=grande_output_init,
+                grande_split_temperature_start=grande_split_temperature_start,
+                grande_split_temperature_end=grande_split_temperature_end,
+                grande_split_temperature_anneal_steps=grande_split_temperature_anneal_steps,
             )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")

@@ -392,7 +392,7 @@ def argparser_from_config(parser, description="Train Mothernet"):
         mothernet.add_argument(
             "--grande-decoder-variant",
             type=str,
-            choices=["baseline", "factorized_stats"],
+            choices=["baseline", "factorized_stats", "depthwise_factorized_stats"],
             help="GRANDE decoder variant to use.",
         )
         mothernet.add_argument(
@@ -400,6 +400,21 @@ def argparser_from_config(parser, description="Train Mothernet"):
             type=str,
             choices=["zero", "default"],
             help="Initialization mode for GRANDE decoder output projections.",
+        )
+        mothernet.add_argument(
+            "--grande-split-temperature-start",
+            type=float,
+            help="Initial temperature applied to GRANDE split-index logits for depthwise variants.",
+        )
+        mothernet.add_argument(
+            "--grande-split-temperature-end",
+            type=float,
+            help="Final temperature applied to GRANDE split-index logits for depthwise variants.",
+        )
+        mothernet.add_argument(
+            "--grande-split-temperature-anneal-steps",
+            type=int,
+            help="Number of training forwards over which to anneal GRANDE split-index temperature.",
         )
         mothernet.add_argument(
             "--grande-profile",

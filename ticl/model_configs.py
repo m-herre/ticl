@@ -234,6 +234,9 @@ def get_mothernet_config():
             "grande_random_state": 42,
             "grande_decoder_variant": "baseline",
             "grande_output_init": "default",
+            "grande_split_temperature_start": 1.0,
+            "grande_split_temperature_end": 1.0,
+            "grande_split_temperature_anneal_steps": 0,
             "grande_profile": False,
         }
     }
