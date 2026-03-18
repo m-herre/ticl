@@ -726,6 +726,8 @@ class GrandeDecoder(nn.Module):
         grande_dropout=0.0,
         missing_values=True,
         grande_random_state=42,
+        grande_decoder_variant="baseline",
+        grande_output_init="default",
     ):
         super().__init__()
         self.emsize = emsize
@@ -744,15 +746,30 @@ class GrandeDecoder(nn.Module):
         self.grande_dropout = grande_dropout
         self.missing_values = missing_values
         self.grande_random_state = grande_random_state
+        self.grande_decoder_variant = grande_decoder_variant
+        self.grande_output_init = grande_output_init
+        if self.grande_decoder_variant not in {"baseline", "factorized_stats"}:
+            raise ValueError(
+                f"Unknown grande_decoder_variant: {self.grande_decoder_variant}"
+            )
+        if self.grande_output_init not in {"default", "zero"}:
+            raise ValueError(
+                f"Unknown grande_output_init: {self.grande_output_init}"
+            )
 
         self.selected_variables = resolve_selected_variables(selected_variables, in_size)
         self.n_nodes = 2**tree_depth - 1
         self.n_leaves = 2**tree_depth
         self.stats_dim = 3 + n_out
+        self.split_values_size = self.n_nodes * self.selected_variables
+        self.split_index_size = self.n_nodes * self.selected_variables
+        self.estimator_weights_size = self.n_leaves
+        self.leaf_classes_size = self.n_leaves * self.n_out
         self.params_per_tree = (
-            2 * self.n_nodes * self.selected_variables
-            + self.n_leaves
-            + self.n_leaves * self.n_out
+            self.split_values_size
+            + self.split_index_size
+            + self.estimator_weights_size
+            + self.leaf_classes_size
         )
 
         self.summary_layer = SummaryLayer(
@@ -763,24 +780,75 @@ class GrandeDecoder(nn.Module):
             nhead=nhead,
         )
         self.estimator_embedding = nn.Embedding(n_estimators, hidden_size)
-        mlp_in_size = self.summary_layer.out_size + self.selected_variables * self.stats_dim + hidden_size
-        self.mlp = make_decoder_mlp(
-            mlp_in_size,
-            hidden_size,
-            self.params_per_tree,
-            n_layers=decoder_hidden_layers,
-            activation=decoder_activation,
+        mlp_in_size = (
+            self.summary_layer.out_size
+            + self.selected_variables * self.stats_dim
+            + hidden_size
         )
-        # Small random init matching reference GRANDE's N(0, 0.05).
-        with torch.no_grad():
-            nn.init.normal_(self.mlp[-1].weight, mean=0.0, std=0.05)
-            nn.init.normal_(self.mlp[-1].bias, mean=0.0, std=0.05)
+        if self.grande_decoder_variant == "baseline":
+            self.mlp = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.params_per_tree,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self._init_output_projection(self.mlp[-1], baseline=True)
+        else:
+            self.split_value_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.split_values_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.split_index_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.split_index_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.estimator_weight_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.estimator_weights_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            self.leaf_head = make_decoder_mlp(
+                mlp_in_size,
+                hidden_size,
+                self.leaf_classes_size,
+                n_layers=decoder_hidden_layers,
+                activation=decoder_activation,
+            )
+            for head in (
+                self.split_value_head,
+                self.split_index_head,
+                self.estimator_weight_head,
+                self.leaf_head,
+            ):
+                self._init_output_projection(head[-1], baseline=False)
 
         path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
         self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
         self.register_buffer(
             "internal_node_index_list", internal_node_index_list, persistent=True
         )
+
+    def _init_output_projection(self, layer, *, baseline):
+        if self.grande_output_init == "zero":
+            with torch.no_grad():
+                layer.weight.zero_()
+                layer.bias.zero_()
+            return
+
+        if baseline:
+            # Preserve the existing GRANDE decoder initialization regime.
+            with torch.no_grad():
+                nn.init.normal_(layer.weight, mean=0.0, std=0.05)
+                nn.init.normal_(layer.bias, mean=0.0, std=0.05)
 
     def build_context(self, *, batch_size, num_features_used, device, seed=None):
         return build_grande_context(
@@ -826,48 +894,87 @@ class GrandeDecoder(nn.Module):
         if return_profile and x.device.type == "cuda":
             torch.cuda.synchronize(x.device)
         mlp_start = time.perf_counter() if return_profile else None
-        res = self.mlp(decoder_input.reshape(batch_size * self.n_estimators, -1))
+        decoder_input_flat = decoder_input.reshape(batch_size * self.n_estimators, -1)
+        if self.grande_decoder_variant == "baseline":
+            res = self.mlp(decoder_input_flat)
+        else:
+            split_value_delta = self.split_value_head(decoder_input_flat)
+            split_index_logits = self.split_index_head(decoder_input_flat)
+            estimator_weights = self.estimator_weight_head(decoder_input_flat)
+            leaf_classes = self.leaf_head(decoder_input_flat)
         if return_profile:
             if x.device.type == "cuda":
                 torch.cuda.synchronize(x.device)
             timings["grande_decoder_mlp_s"] = time.perf_counter() - mlp_start
-        res = res.view(batch_size, self.n_estimators, self.params_per_tree)
+        if self.grande_decoder_variant == "baseline":
+            res = res.view(batch_size, self.n_estimators, self.params_per_tree)
 
-        offset = 0
-        split_values_size = self.n_nodes * self.selected_variables
-        split_values = res[:, :, offset : offset + split_values_size].view(
-            batch_size,
-            self.n_estimators,
-            self.n_nodes,
-            self.selected_variables,
-        )
-        offset += split_values_size
+            offset = 0
+            split_values = res[:, :, offset : offset + self.split_values_size].view(
+                batch_size,
+                self.n_estimators,
+                self.n_nodes,
+                self.selected_variables,
+            )
+            offset += self.split_values_size
 
-        split_index_size = self.n_nodes * self.selected_variables
-        split_index_logits = res[:, :, offset : offset + split_index_size].view(
-            batch_size,
-            self.n_estimators,
-            self.n_nodes,
-            self.selected_variables,
-        )
-        offset += split_index_size
+            split_index_logits = res[
+                :, :, offset : offset + self.split_index_size
+            ].view(
+                batch_size,
+                self.n_estimators,
+                self.n_nodes,
+                self.selected_variables,
+            )
+            offset += self.split_index_size
 
-        estimator_weights = res[:, :, offset : offset + self.n_leaves].view(
-            batch_size,
-            self.n_estimators,
-            self.n_leaves,
-        )
-        offset += self.n_leaves
+            estimator_weights = res[
+                :, :, offset : offset + self.estimator_weights_size
+            ].view(
+                batch_size,
+                self.n_estimators,
+                self.n_leaves,
+            )
+            offset += self.estimator_weights_size
 
-        leaf_classes = res[:, :, offset : offset + self.n_leaves * self.n_out].view(
-            batch_size,
-            self.n_estimators,
-            self.n_leaves,
-            self.n_out,
-        )
-        offset += self.n_leaves * self.n_out
+            leaf_classes = res[:, :, offset : offset + self.leaf_classes_size].view(
+                batch_size,
+                self.n_estimators,
+                self.n_leaves,
+                self.n_out,
+            )
+            offset += self.leaf_classes_size
 
-        assert offset == self.params_per_tree, "Mismatch in GRANDE decoder output unpacking."
+            assert (
+                offset == self.params_per_tree
+            ), "Mismatch in GRANDE decoder output unpacking."
+        else:
+            delta = split_value_delta.view(
+                batch_size,
+                self.n_estimators,
+                self.n_nodes,
+                self.selected_variables,
+            )
+            mu = feature_stats[..., 0].unsqueeze(2)
+            sigma = feature_stats[..., 1].clamp_min(1e-3).unsqueeze(2)
+            split_values = mu + delta * sigma
+            split_index_logits = split_index_logits.view(
+                batch_size,
+                self.n_estimators,
+                self.n_nodes,
+                self.selected_variables,
+            )
+            estimator_weights = estimator_weights.view(
+                batch_size,
+                self.n_estimators,
+                self.n_leaves,
+            )
+            leaf_classes = leaf_classes.view(
+                batch_size,
+                self.n_estimators,
+                self.n_leaves,
+                self.n_out,
+            )
 
         if return_profile:
             return (

@@ -308,6 +308,8 @@ class MotherNet(ModelPredictor):
         grande_dropout=0.0,
         missing_values=True,
         grande_random_state=42,
+        grande_decoder_variant="baseline",
+        grande_output_init="default",
         grande_profile=False,
     ):
         super().__init__()
@@ -403,6 +405,8 @@ class MotherNet(ModelPredictor):
                 grande_dropout=grande_dropout,
                 missing_values=missing_values,
                 grande_random_state=grande_random_state,
+                grande_decoder_variant=grande_decoder_variant,
+                grande_output_init=grande_output_init,
             )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")

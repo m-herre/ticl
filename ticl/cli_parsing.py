@@ -390,6 +390,18 @@ def argparser_from_config(parser, description="Train Mothernet"):
             help="Random seed used for deterministic GRANDE feature-subset sampling during extraction.",
         )
         mothernet.add_argument(
+            "--grande-decoder-variant",
+            type=str,
+            choices=["baseline", "factorized_stats"],
+            help="GRANDE decoder variant to use.",
+        )
+        mothernet.add_argument(
+            "--grande-output-init",
+            type=str,
+            choices=["zero", "default"],
+            help="Initialization mode for GRANDE decoder output projections.",
+        )
+        mothernet.add_argument(
             "--grande-profile",
             type=str2bool,
             help="Whether to record per-epoch GRANDE timing breakdowns for context, stats, decoder, and forward.",
