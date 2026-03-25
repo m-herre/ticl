@@ -9,9 +9,24 @@ Every directory contains a `FILES.md` describing each file. When starting a task
 1. **Read the relevant `FILES.md` files first** before opening source files.
 2. When you create, rename, or delete files, **update the corresponding `FILES.md`**.
 
+## Research Methodology
+
+This is a **research project**. We follow an evidence-based approach:
+
+1. **Hypothesize** — Develop a concrete hypothesis about what might improve performance or explain a behavior.
+2. **Design test** — Decide how to test the hypothesis (experiment, ablation, diagnostic, etc.).
+3. **Execute & measure** — Run the experiment, collect results.
+4. **Record** — Log findings in `EXPERIMENTS.md` so we build cumulative knowledge.
+
+Do **not** jump straight to fixing or changing code. Always start with a hypothesis and a plan to validate it.
+
 ## Project Goal
 
-Build a **MotherNet for GRANDE** — a transformer backbone that predicts the parameters of a **hard, axis-aligned, differentiable decision tree ensemble** (like GRANDE) instead of MLP weights. The end goal is an in-context learner that outputs interpretable tree ensembles with crisp, axis-aligned splits. Key files:
+Build a **MotherNet for GRANDE** — a transformer backbone that predicts the parameters of a **hard, axis-aligned, differentiable decision tree ensemble** (like GRANDE) instead of MLP weights. The end goal is an in-context learner that outputs interpretable tree ensembles with crisp, axis-aligned splits.
+
+**Current status**: The GRANDE MotherNet is functional but does **not yet match MLP MotherNet performance**. The primary research goal is to close this gap — at minimum matching MLP MotherNet accuracy.
+
+Key files:
 
 - `grande.py` — standalone GRANDE reference implementation
 - `ticl/models/mothernet.py` — MotherNet model (`ModelPredictor`, `MotherNet`)

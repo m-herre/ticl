@@ -1,6 +1,7 @@
 # Files
 
 - `CLAUDE.md` — Instructions and architecture overview for Claude Code assistance
+- `EXPERIMENTS.md` — Experiment log: hypotheses, configs, results, and conclusions
 - `NOTICE.txt` — Copyright notice (University of Freiburg, original authors)
 - `README.md` — Project README covering MotherNet, GAMformer, and TabFlex usage
 - `azure-pipelines.yml` — Azure DevOps CI pipeline: conda setup, pytest, caching
