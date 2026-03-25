@@ -4,75 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Orientation: FILES.md Index
 
-Every directory and subdirectory contains a `FILES.md` file that briefly describes each file in that directory. When starting a new task:
+Every directory contains a `FILES.md` describing each file. When starting a task:
 
-1. **Read the relevant `FILES.md` files first** to orient yourself within the repo before opening individual source files.
-2. Use `FILES.md` to identify which files are likely relevant to the task, then read only those.
-3. When you create, rename, or delete files, **update the corresponding `FILES.md`** to keep the index accurate.
-
-This avoids unnecessary file reads and helps you navigate the codebase efficiently.
+1. **Read the relevant `FILES.md` files first** before opening source files.
+2. When you create, rename, or delete files, **update the corresponding `FILES.md`**.
 
 ## Project Goal
 
-Build a **MotherNet for GRANDE** — instead of having MotherNet's transformer backbone predict MLP weights, have it predict the parameters of a GRANDE-style differentiable decision tree ensemble. The relevant files are:
+Build a **MotherNet for GRANDE** — a transformer backbone that predicts the parameters of a **hard, axis-aligned, differentiable decision tree ensemble** (like GRANDE) instead of MLP weights. The end goal is an in-context learner that outputs interpretable tree ensembles with crisp, axis-aligned splits. Key files:
 
-- `grande.py` — standalone GRANDE implementation (reference for the tree algorithm)
-- `ticl/models/mothernet.py` — MotherNet model with `ModelPredictor` (forward/tree_forward) and `MotherNet` (architecture)
-- `ticl/models/decoders.py` — `GradTreeDecoder`, `GrandeDecoder`, and `MLPModelDecoder`
+- `grande.py` — standalone GRANDE reference implementation
+- `ticl/models/mothernet.py` — MotherNet model (`ModelPredictor`, `MotherNet`)
+- `ticl/models/decoders.py` — `GrandeDecoder` (and legacy `GradTreeDecoder`, `MLPModelDecoder`)
 - `ticl/models/grande_core.py` — shared GRANDE context sampling, feature statistics, and tree forward kernel
 
 ## Architecture Overview
 
-### MotherNet Pipeline (ticl/models/mothernet.py)
-
 ```
-Training data (x, y) → Encoder → TransformerEncoder → Decoder → Child model params → Inference on x_test
+Training data (x, y) -> Encoder -> TransformerEncoder -> GrandeDecoder -> GRANDE params -> grande_forward(x_test)
 ```
 
-1. **Encoder**: `Linear` maps input features to `emsize`-dim embeddings. Y is encoded and added to X embeddings.
-2. **Transformer backbone**: Standard `TransformerEncoderSimple` (batch_first=False). Produces per-sample contextual embeddings.
-3. **Decoder**: Conditioned on transformer output + training labels, produces child model parameters.
-4. **Child model forward**: Uses predicted params to run inference on test data within `ModelPredictor.forward()`.
+1. **Encoder**: Linear maps input features to `emsize`-dim embeddings. Y is encoded and added.
+2. **Transformer backbone**: `TransformerEncoderSimple` (batch_first=False). Produces per-sample contextual embeddings.
+3. **GrandeDecoder**: Conditioned on transformer output + labels, produces child model parameters: `split_values`, `split_index_logits`, `estimator_weights`, `leaf_classes`.
+4. **grande_forward()**: Shared kernel for training and inference. Differentiable tree ensemble with straight-through estimators.
 
-### Child Model Dispatch (`child_model` param)
+### GrandeDecoder Variants (`--grande-decoder-variant`)
 
-- `"mlp"` → `MLPModelDecoder` → predicts (bias, weight) tuples for each MLP layer → matrix multiply chain in `forward()`
-- `"gradtree"` → `GradTreeDecoder` → predicts (I_logits, T, L) → differentiable tree pass in `tree_forward()`
-- `"grande"` → `GrandeDecoder` → predicts GRANDE-style `(split_values, split_index_logits, estimator_weights, leaf_classes)` and uses the shared `grande_forward()` kernel
+- **baseline**: Single MLP outputs all params at once
+- **factorized_stats**: Four separate MLPs for split_values, split_index, estimator_weights, leaf_classes
+- **depthwise_factorized_stats**: GRU-based recurrent decoder that processes tree levels sequentially
 
-### GradTreeDecoder (ticl/models/decoders.py:561)
+### grande_forward() Kernel (ticl/models/grande_core.py)
 
-Predicts flat parameter vector, then reshapes into per-estimator tree params:
-- **I_logits**: `(batch, n_estimators, n_nodes, n_features)` — feature selection logits per internal node
-- **T**: `(batch, n_estimators, n_nodes)` — scalar split threshold per node (no feature dim — unnecessary when predicted by a hypernetwork)
-- **L**: `(batch, n_estimators, n_leaves, n_out)` — leaf class logits
-
-Total params per tree: `n_nodes * in_size + n_nodes + n_leaves * n_out`. Multiplied by `n_estimators`.
-
-Precomputes `path_identifier_list` and `internal_node_index_list` (registered as non-grad parameters) for mapping leaf→internal-node paths during inference.
-
-### tree_forward (ticl/models/mothernet.py:35)
-
-Implements Algorithm 1 from the GradTree/GRANDE paper with straight-through (ST) estimators:
-1. Feature selection: softmax + ST hard one-hot on I_logits (masks padding features with -inf)
-2. Split probability: `softsign((threshold - selected_feature_value)) + 1) / 2`, then ST round
+1. Feature selection: softmax + ST hard one-hot on split_index_logits
+2. Split decision: softsign on (threshold - selected_feature_value), then ST round
 3. Path probability: product over depth using precomputed path indices
-4. Leaf aggregation: einsum over path probs and leaf logits
-5. Ensemble average over estimators
+4. Optional NaN-aware routing (missing values sent down both branches)
+5. Instance-dependent weighted ensemble aggregation (softmax over estimator_weights)
+6. Optional dropout on estimator weights during training
 
-### GRANDE_Module (grande.py:165) — Reference
+### GRANDE Context (ticl/models/grande_core.py)
 
-Standalone GRANDE with its own learnable parameters (split_values, split_index_array, estimator_weights, leaf_classes_array). Key differences from the MotherNet GradTree version:
-- Has per-estimator feature subset selection (`features_by_estimator`)
-- Uses per-estimator learned weights for weighted aggregation (softmax over `estimator_weights`)
-- Supports data subsetting per estimator (`data_subset_fraction`, `bootstrap`)
-- Has dropout on estimator weights
-- Uses separate learning rates for splits, indices, weights, and leaves
-- Missing value handling via nan masking
-
-### SummaryLayer (ticl/models/decoders.py:285)
-
-Shared between MLPModelDecoder and GradTreeDecoder. Converts per-sample transformer output into a fixed-size dataset-level summary. Supports multiple `decoder_type` strategies: `output_attention` (default, uses cross-attention with learned query), `special_token`, `class_tokens`, `class_average`, `average`.
+- `build_grande_context()`: Samples feature subsets per estimator (`features_by_estimator`)
+- `build_grande_feature_stats()`: Per-estimator statistics (mean, std, missing rate, class-conditional means)
+- Supports data subsetting and bootstrap for estimator-local statistics
 
 ## Commands
 
@@ -80,65 +56,101 @@ Shared between MLPModelDecoder and GradTreeDecoder. Converts per-sample transfor
 # Install
 conda create -f environment.yml && conda activate ticl && pip install -e .
 
-# Train MotherNet (MLP child)
+# Train MotherNet (GRANDE child)
+python ticl/fit_model.py mothernet \
+    --child-model grande \
+    --tree-depth 4 \
+    --n-estimators 64 \
+    --selected-variables 16 \
+    --num-steps 2048 \
+    --use-wandb
+
+# Train MotherNet (MLP child, legacy default)
 python ticl/fit_model.py mothernet
 
-# Train MotherNet (GradTree child)
-python ticl/fit_model.py mothernet --child-model gradtree --tree-depth 5 --n-estimators 10
-
-# Specify GPU
-python ticl/fit_model.py mothernet -g 0
+# Continue from checkpoint
+python ticl/fit_model.py mothernet --continue-run --warm-start-from <path.cpkt>
 
 # See all options
 python ticl/fit_model.py mothernet -h
 ```
 
-## Key Config (ticl/model_configs.py)
+### SLURM Batch Jobs
 
-MotherNet defaults include `child_model: "mlp"`, `tree_depth: 5`, `n_estimators: 1`. Override via CLI args (`--child-model`, `--tree-depth`, `--n-estimators`). Config is parsed in `ticl/cli_parsing.py`.
+```bash
+# Submit a batch job
+sbatch continue_gradtree.sh
+
+# Check job status
+squeue -u $USER
+
+# Cancel a job
+scancel <job_id>
+
+# View logs
+tail -f logs/gradtree_<job_id>.out
+```
+
+Batch scripts use `#SBATCH` directives. See `continue_gradtree.sh` for the current GRANDE training template (20 CPUs, 1 GPU, 50GB RAM, partition `gpu-vram-94gb`).
+
+### Interactive GPU Sessions
+
+```bash
+# Get an interactive GPU session
+salloc --partition=gpu-vram-94gb --gres=gpu:1 --cpus-per-task=12 --mem=50G
+
+# Then run training interactively
+python ticl/fit_model.py mothernet --child-model grande ...
+```
+
+## Key GRANDE CLI Args (ticl/cli_parsing.py)
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `--child-model` | `mlp` | `grande` for GRANDE path |
+| `--tree-depth` | `5` | Depth of each tree |
+| `--n-estimators` | `1` | Number of trees in ensemble |
+| `--selected-variables` | `16` | Feature budget per estimator (fraction or absolute) |
+| `--data-subset-fraction` | `1.0` | Estimator-local data sampling ratio |
+| `--bootstrap` | `False` | Bootstrap vs without-replacement sampling |
+| `--grande-dropout` | `0.0` | Dropout on estimator weights |
+| `--missing-values` | `True` | NaN-aware routing |
+| `--grande-decoder-variant` | `baseline` | `baseline` / `factorized_stats` / `depthwise_factorized_stats` |
+| `--grande-output-init` | `default` | `zero` or `default` |
+| `--grande-split-temperature-start` | `1.0` | Split logit temperature at start |
+| `--grande-split-temperature-end` | `1.0` | Split logit temperature at end |
+| `--grande-split-temperature-anneal-steps` | `0` | Steps to anneal temperature |
+| `--grande-profile` | `False` | Log per-epoch timing breakdown |
 
 ## Tensor Conventions
 
 - Transformer operates **batch_first=False**: sequences are `(seq_len, batch, emsize)`
 - `x` input: `(n_samples, batch, n_features)`, split at `single_eval_pos` into train/test
-- `info` dict may contain `num_features_used` for masking padded features in tree inference
+- `info` dict may contain `num_features_used` for masking padded features
 - Decoders output per-batch parameters; test inference is vectorized over `n_test` samples
 
-## GradTree Code Paths — Keep In Sync
+## GRANDE Code Paths — Keep In Sync
 
-The GradTree child model has **three code paths** that must stay consistent when changing tensor shapes or tree logic:
+All three paths use the **same `grande_forward()` kernel**. Any change to decoder output shapes must be propagated to all three:
 
-1. **Training forward**: `ticl/models/mothernet.py` → `tree_forward()` (differentiable, uses ST operators)
-2. **Parameter extraction**: `ticl/prediction/mothernet.py` → `extract_gradtree_model()` (runs decoder, squeezes batch dim)
-3. **Standalone inference**: `ticl/prediction/mothernet.py` → `predict_with_gradtree_model()` (numpy CPU path + torch CUDA path)
+1. **Training forward**: `ticl/models/mothernet.py` -> `ModelPredictor.forward()` (grande branch)
+2. **Parameter extraction**: `ticl/prediction/mothernet.py` -> `extract_grande_model()`
+3. **Standalone inference**: `ticl/prediction/mothernet.py` -> `predict_with_grande_model()`
 
-Any change to decoder output shapes (in `ticl/models/decoders.py` → `GradTreeDecoder`) must be propagated to all three.
+Key invariants:
+- `GrandeDecoder` does **not** predict `features_by_estimator`. Those are sampled externally via `build_grande_context()` and must be carried through extraction/inference.
+- Row subsampling / bootstrap affect estimator-local feature statistics, not the inference-time kernel directly.
+- Avoid reintroducing separate numpy/CUDA implementations — the shared kernel is intentional.
 
-## Current Simplifications Vs `grande.py`
+## Training Time
 
-These notes apply to the legacy `child_model="gradtree"` path. The new `child_model="grande"` path is the closer GRANDE integration and uses `ticl/models/grande_core.py`.
+Full MotherNet training is slow: ~4 min/epoch at `--num-steps 2048`, ~12 min/epoch at `--num-steps 8192`. Keep this in mind when testing or experimenting — prefer small-scale runs (fewer steps/estimators/depth) for quick iteration, and reserve full-scale runs for validation.
 
-- **Estimator aggregation**: MotherNet averages estimator logits uniformly. `grande.py` uses instance-dependent softmax weights derived from `estimator_weights` and the active leaf per estimator, with optional dropout.
-- **Missing values**: MotherNet currently zero-imputes NaNs before tree evaluation. `grande.py` has nan-aware routing that sends masked splits down both branches with learned probabilities.
-- **Feature subsets per estimator**: MotherNet predicts split logits over all padded features for every estimator. `grande.py` samples `features_by_estimator` and each estimator only chooses among its subset.
-- **Estimator data subsampling**: MotherNet does not model `data_subset_fraction` / `bootstrap`.
-- **Parameterization**: MotherNet predicts scalar threshold `T` per node directly. `grande.py` learns `split_values` and `split_index_array` separately, then combines them into node thresholds.
+## Performance Notes
 
-When comparing outputs against `grande.py`, do not assume parity unless these gaps are intentionally closed.
+- Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized; avoid Python loops over `batch_size * n_estimators`.
+- Use `--grande-profile True` to record epoch-level timings: `grande_context_s`, `grande_feature_stats_s`, `grande_decoder_mlp_s`, `grande_forward_s`.
 
-## Review Checklist For Future GradTree Changes
+## Legacy: GradTree Path
 
-- If you add estimator weights, update both `tree_forward()` and `predict_with_gradtree_model()`; the current ensemble reduction is a plain mean.
-- If you add nan-aware routing, do it in both training and standalone inference. Right now both CPU and CUDA inference paths zero-fill NaNs.
-- If you change feature selection or threshold semantics, verify all three GradTree code paths plus `extract_gradtree_model()`.
-- `GradTreeDecoder` stores `path_identifier_list` and `internal_node_index_list` as non-trainable parameters in the state dict. Any migration of those tensors affects checkpoint compatibility.
-- `MotherNetClassifier.fit()` accepts `model_type == "la_mothernet"`, but the extraction helpers in `ticl/prediction/mothernet.py` only know how to run `transformer_encoder`, `linear_attention`, or perceiver-style models. If GradTree is used with `SSMMotherNet`, those helpers must be extended to call `model.ssm` / `model.inner_forward()`.
-
-## GRANDE Path Notes
-
-- `child_model="grande"` is the end-to-end GRANDE-style path. It uses a fixed estimator-local feature budget (`selected_variables`) instead of predicting over the full padded feature axis.
-- `GrandeDecoder` does **not** predict `features_by_estimator`. Those feature subsets are sampled externally via `build_grande_context()` and must be carried through extraction/inference.
-- The GRANDE path uses one shared torch kernel (`grande_forward`) for training forward and extracted inference. Avoid reintroducing separate numpy/CUDA implementations unless there is a strong reason.
-- Row subsampling / bootstrap affect the estimator-local feature statistics used by `GrandeDecoder`, not the inference-time tree kernel directly.
-- Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized; avoid reintroducing Python loops over `batch_size * n_estimators`.
-- Use `--grande-profile True` when investigating runtime. It records epoch-level timings for `grande_context_s`, `grande_feature_stats_s`, `grande_decoder_mlp_s`, and `grande_forward_s`.
+The `child_model="gradtree"` path is **legacy**. It predicts `(I_logits, T, L)` and uses a separate `tree_forward()` in `mothernet.py`. The GRANDE path supersedes it. Do not invest in GradTree unless specifically asked.
