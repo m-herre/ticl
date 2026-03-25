@@ -78,6 +78,15 @@ def load_model(path, device, verbose=False):
             # for backwards compatibility
             model_state["linear_attention" + module_name[3:]] = model_state.pop(module_name)
 
+    # Backfill persistent buffers introduced after older checkpoints were saved.
+    # This preserves strict parameter loading while allowing decoder counters and
+    # similar non-learned state to fall back to the current model defaults.
+    parameter_names = {name for name, _ in model.named_parameters()}
+    for module_name, value in model.state_dict().items():
+        if module_name in model_state or module_name in parameter_names:
+            continue
+        model_state[module_name] = value.detach().clone()
+
     model.load_state_dict(model_state)
     model.to(device)
     model.eval()
