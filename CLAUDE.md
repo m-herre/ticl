@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Orientation: FILES.md Index
+
+Every directory and subdirectory contains a `FILES.md` file that briefly describes each file in that directory. When starting a new task:
+
+1. **Read the relevant `FILES.md` files first** to orient yourself within the repo before opening individual source files.
+2. Use `FILES.md` to identify which files are likely relevant to the task, then read only those.
+3. When you create, rename, or delete files, **update the corresponding `FILES.md`** to keep the index accurate.
+
+This avoids unnecessary file reads and helps you navigate the codebase efficiently.
+
 ## Project Goal
 
 Build a **MotherNet for GRANDE** — instead of having MotherNet's transformer backbone predict MLP weights, have it predict the parameters of a GRANDE-style differentiable decision tree ensemble. The relevant files are:

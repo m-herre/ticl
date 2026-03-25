@@ -1,0 +1,21 @@
+# Files
+
+- `1d_step_function_failure_cases.ipynb` — Visualize failure cases on 1D step function priors.
+- `binary_pattern_failure_cases.ipynb` — Failure case analysis for binary pattern datasets.
+- `compare_models.ipynb` — Side-by-side comparison of different model checkpoints.
+- `integrate_ebm_visualizations.ipynb` — Visualizations for EBM (explainable boosting machine) integration.
+- `large_test_set.ipynb` — Evaluation on larger held-out test sets.
+- `mlflow-plotting.ipynb` — Plot training metrics from MLflow experiment tracking.
+- `paper_plots.ipynb` — Generate figures for the paper.
+- `plots_comparision_paper.ipynb` — Additional comparison plots for the paper.
+- `regression.ipynb` — Regression task evaluation and visualization.
+- `run_test_set_evaluation.ipynb` — Run benchmark evaluation on OpenML test datasets.
+- `run_test_set_evaluation-Copy1.ipynb` — Copy of test set evaluation (variant 1).
+- `run_test_set_evaluation-Copy2.ipynb` — Copy of test set evaluation (variant 2).
+- `run_test_set_evaluation-Copy3.ipynb` — Copy of test set evaluation (variant 3).
+- `run_validation_set_evaluation.ipynb` — Run benchmark evaluation on validation datasets.
+- `run_validation_set_regression.ipynb` — Validation set evaluation for regression tasks.
+- `shape_function_comparison.ipynb` — Compare learned shape functions across additive models.
+- `tabzilla_dataset_view.ipynb` — Explore TabZilla dataset collection metadata.
+- `validation_set_scores.ipynb` — Aggregate and display validation set scores.
+- `validation_set_select.ipynb` — Select validation datasets for benchmarking.
