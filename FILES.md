@@ -1,6 +1,7 @@
 # Files
 
 - `CLAUDE.md` — Instructions and architecture overview for Claude Code assistance
+- `DECODER.md` — Conceptual guide to the currently supported decoder families and shared decoder readout modes
 - `EXPERIMENTS.md` — Experiment log: hypotheses, configs, results, and conclusions
 - `NOTICE.txt` — Copyright notice (University of Freiburg, original authors)
 - `README.md` — Project README covering MotherNet, GAMformer, and TabFlex usage
