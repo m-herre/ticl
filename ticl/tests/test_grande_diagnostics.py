@@ -38,7 +38,7 @@ def _make_grande_batch():
     return ((info, x, y), y.clone(), single_eval_pos)
 
 
-def _make_grande_model(*, diagnostics=False):
+def _make_grande_model(*, diagnostics=False, diagnostics_gradients=False):
     return MotherNet(
         n_out=3,
         emsize=16,
@@ -60,6 +60,7 @@ def _make_grande_model(*, diagnostics=False):
         selected_variables=4,
         grande_decoder_variant="factorized_stats",
         grande_diagnostics=diagnostics,
+        grande_diagnostics_gradients=diagnostics_gradients,
         grande_diagnostics_level="scalars_small_hists",
         grande_diagnostics_seed=7,
         grande_diagnostics_hist_max_points=128,
@@ -121,7 +122,7 @@ def test_prepare_grande_diagnostic_snapshot_is_deterministic_and_restores_rng_st
     assert torch.allclose(after_torch, expected_torch)
 
 
-def test_run_grande_diagnostics_collects_backbone_and_grande_gradients():
+def test_run_grande_diagnostics_forward_only_skips_gradient_metrics():
     model = _make_grande_model(diagnostics=True)
     snapshot = _make_grande_batch()
     criterion = nn.CrossEntropyLoss(reduction="none")
@@ -138,8 +139,38 @@ def test_run_grande_diagnostics_collects_backbone_and_grande_gradients():
         level="scalars_small_hists",
         hist_max_points=128,
         base_seed=7,
+        collect_gradients=False,
     )
 
+    assert metrics["grande_diagnostics/meta/gradient_metrics_enabled"] == 0.0
+    assert "grande_diagnostics/thresholds/depth_0/zscore_abs_mean" in metrics
+    assert "grande_diagnostics/diversity/effective_dim_95" in metrics
+    assert "grande_diagnostics/gradients/params/backbone/l2_norm" not in metrics
+    assert "grande_diagnostics/gradients/activations/transformer_output/l2_norm" not in metrics
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_run_grande_diagnostics_collects_backbone_and_grande_gradients():
+    model = _make_grande_model(diagnostics=True, diagnostics_gradients=True)
+    snapshot = _make_grande_batch()
+    criterion = nn.CrossEntropyLoss(reduction="none")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    metrics = run_grande_diagnostics(
+        model=model,
+        snapshot=snapshot,
+        criterion=criterion,
+        optimizer=optimizer,
+        device="cpu",
+        n_out=3,
+        epoch=0,
+        level="scalars_small_hists",
+        hist_max_points=128,
+        base_seed=7,
+        collect_gradients=True,
+    )
+
+    assert metrics["grande_diagnostics/meta/gradient_metrics_enabled"] == 1.0
     assert metrics["grande_diagnostics/gradients/params/backbone/l2_norm"] > 0
     assert metrics["grande_diagnostics/gradients/params/decoder/l2_norm"] > 0
     assert metrics["grande_diagnostics/gradients/activations/transformer_output/l2_norm"] > 0

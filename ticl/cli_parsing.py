@@ -427,6 +427,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
             help="Whether to log epoch-0 and per-epoch GRANDE diagnostics to W&B.",
         )
         mothernet.add_argument(
+            "--grande-diagnostics-gradients",
+            type=str2bool,
+            help="Whether GRANDE diagnostics should run a separate backward pass to log gradient metrics.",
+        )
+        mothernet.add_argument(
             "--grande-diagnostics-level",
             type=str,
             choices=["scalars", "scalars_small_hists", "full_hists"],

@@ -416,6 +416,7 @@ class MotherNet(ModelPredictor):
         grande_split_temperature_anneal_steps=0,
         grande_profile=False,
         grande_diagnostics=False,
+        grande_diagnostics_gradients=False,
         grande_diagnostics_level="scalars_small_hists",
         grande_diagnostics_seed=0,
         grande_diagnostics_hist_max_points=2048,
@@ -426,6 +427,7 @@ class MotherNet(ModelPredictor):
         self.tree_depth = tree_depth
         self.grande_profile = grande_profile
         self.grande_diagnostics = grande_diagnostics
+        self.grande_diagnostics_gradients = grande_diagnostics_gradients
         self.grande_diagnostics_level = grande_diagnostics_level
         self.grande_diagnostics_seed = grande_diagnostics_seed
         self.grande_diagnostics_hist_max_points = grande_diagnostics_hist_max_points
@@ -453,7 +455,7 @@ class MotherNet(ModelPredictor):
 
         backbone_size = sum(p.numel() for p in self.transformer_encoder.parameters())
         if wandb.run:
-            wandb.log({"backbone_size": backbone_size})
+            wandb.log({"backbone_size": backbone_size}, step=0)
         print("Number of parameters in backbone: ", backbone_size)
 
         self.decoder_activation = decoder_activation

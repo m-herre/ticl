@@ -108,7 +108,8 @@ def evaluate(
             print(f'Evaluating {ds_name} with {len(X)} samples')
             
         if wandb.run is not None:
-            wandb.log({'dataset': ds_name, 'n_samples': dataset_n_samples})
+            wandb.run.summary["last_eval_dataset"] = ds_name
+            wandb.run.summary["last_eval_n_samples"] = dataset_n_samples
 
         aggregated_metric, num = torch.tensor(0.0), 0
         ds_result = {}
@@ -121,7 +122,7 @@ def evaluate(
             eval_position_n_samples = int(eval_position_real * 2.0)
             
             if wandb.run is not None:
-                wandb.log({'inference_train_test_sample_number': eval_position_real})
+                wandb.run.summary["last_inference_train_test_sample_number"] = eval_position_real
             
             # r should be 
             # None, outputs, eval_ys, best_configs, time_used

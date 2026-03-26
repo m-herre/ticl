@@ -298,7 +298,8 @@ def get_model(
 
     if verbose:
         model_size = sum(p.numel() for p in model.parameters())
-        if wandb.run: wandb.log({"model_size": model_size})
+        if wandb.run:
+            wandb.log({"model_size": model_size}, step=0)
         if 'linear_attention' in model_type:
             print(f"Using a SSM with {model_size/1000/1000:.{2}f} M parameters")
         else:

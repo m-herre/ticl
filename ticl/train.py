@@ -212,6 +212,7 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 level=getattr(profile_model, "grande_diagnostics_level", "scalars_small_hists"),
                 hist_max_points=getattr(profile_model, "grande_diagnostics_hist_max_points", 2048),
                 base_seed=getattr(profile_model, "grande_diagnostics_seed", 0),
+                collect_gradients=getattr(profile_model, "grande_diagnostics_gradients", False),
             )
             if init_metrics:
                 wandb.log(init_metrics, step=max(start_epoch - 1, 0))
@@ -281,6 +282,7 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                     level=getattr(profile_model, "grande_diagnostics_level", "scalars_small_hists"),
                     hist_max_points=getattr(profile_model, "grande_diagnostics_hist_max_points", 2048),
                     base_seed=getattr(profile_model, "grande_diagnostics_seed", 0),
+                    collect_gradients=getattr(profile_model, "grande_diagnostics_gradients", False),
                 )
                 wandb_metrics.update(diagnostics_metrics)
 

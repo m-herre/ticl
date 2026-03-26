@@ -1,5 +1,5 @@
 import random
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import numpy as np
 import torch
@@ -109,6 +109,21 @@ def prepare_grande_diagnostic_snapshot(dl, seed):
     with temporary_rng_seed(seed):
         batch = dl.get_test_batch()
     return _clone_to_cpu(batch)
+
+
+@contextmanager
+def temporary_recompute_attn_disabled(model):
+    layers = getattr(getattr(model, "transformer_encoder", None), "layers", [])
+    previous_values = []
+    for layer in layers:
+        if hasattr(layer, "recompute_attn"):
+            previous_values.append((layer, layer.recompute_attn))
+            layer.recompute_attn = False
+    try:
+        yield
+    finally:
+        for layer, previous_value in previous_values:
+            layer.recompute_attn = previous_value
 
 
 def _depth_node_indices(tree_depth, device):
@@ -779,6 +794,7 @@ def run_grande_diagnostics(
     level,
     hist_max_points,
     base_seed,
+    collect_gradients=False,
 ):
     if getattr(model, "child_model", None) != "grande":
         return {}
@@ -791,65 +807,71 @@ def run_grande_diagnostics(
     try:
         model.eval()
         optimizer.zero_grad()
-        with temporary_rng_seed(base_seed):
-            output, debug = model(
+        with temporary_recompute_attn_disabled(model):
+            with temporary_rng_seed(base_seed):
+                grad_context = nullcontext() if collect_gradients else torch.no_grad()
+                with grad_context:
+                    output, debug = model(
+                        data,
+                        single_eval_pos=single_eval_pos,
+                        return_debug=True,
+                        grande_context_seed=base_seed,
+                        advance_split_temperature=False,
+                        grande_use_training_schedule=was_training,
+                    )
+                    eval_targets = targets[single_eval_pos:] if single_eval_pos is not None else targets
+                    loss, nan_share = eval_criterion(
+                        criterion,
+                        eval_targets,
+                        output,
+                        device=device,
+                        n_out=n_out,
+                    )
+                    loss = loss.mean()
+                if collect_gradients:
+                    loss.backward()
+
+            metrics["grande_diagnostics/output/loss"] = float(loss.detach().item())
+            metrics["grande_diagnostics/output/nan_share"] = float(nan_share)
+            metrics["grande_diagnostics/meta/epoch"] = float(epoch)
+            metrics["grande_diagnostics/meta/gradient_metrics_enabled"] = float(collect_gradients)
+            metrics["grande_diagnostics/meta/split_temperature"] = float(
+                model.decoder.peek_split_temperature(
+                    device=device,
+                    use_training_schedule=was_training,
+                ).detach().cpu().item()
+            )
+
+            if collect_gradients:
+                parameter_layer_norms = _collect_parameter_grad_metrics(model, metrics)
+                _collect_gradient_metrics(metrics, debug, level, hist_max_points)
+                _append_histogram(
+                    metrics,
+                    "grande_diagnostics/hists/backbone_param_grad_norms",
+                    np.asarray(parameter_layer_norms, dtype=np.float32) if parameter_layer_norms else None,
+                    level,
+                    hist_max_points,
+                )
+            _collect_structure_metrics(metrics, debug, data, level, hist_max_points)
+            metrics.update(
+                _classification_metrics(
+                    output.detach().float(),
+                    eval_targets.detach(),
+                    n_out=n_out,
+                )
+            )
+            _collect_seed_stability_metrics(
+                metrics,
+                model,
                 data,
-                single_eval_pos=single_eval_pos,
-                return_debug=True,
-                grande_context_seed=base_seed,
-                advance_split_temperature=False,
-                grande_use_training_schedule=was_training,
-            )
-            eval_targets = targets[single_eval_pos:] if single_eval_pos is not None else targets
-            loss, nan_share = eval_criterion(
+                targets,
+                single_eval_pos,
                 criterion,
-                eval_targets,
-                output,
-                device=device,
-                n_out=n_out,
+                device,
+                n_out,
+                base_seed,
+                was_training,
             )
-            loss = loss.mean()
-            loss.backward()
-
-        metrics["grande_diagnostics/output/loss"] = float(loss.detach().item())
-        metrics["grande_diagnostics/output/nan_share"] = float(nan_share)
-        metrics["grande_diagnostics/meta/epoch"] = float(epoch)
-        metrics["grande_diagnostics/meta/split_temperature"] = float(
-            model.decoder.peek_split_temperature(
-                device=device,
-                use_training_schedule=was_training,
-            ).detach().cpu().item()
-        )
-
-        parameter_layer_norms = _collect_parameter_grad_metrics(model, metrics)
-        _collect_gradient_metrics(metrics, debug, level, hist_max_points)
-        _append_histogram(
-            metrics,
-            "grande_diagnostics/hists/backbone_param_grad_norms",
-            np.asarray(parameter_layer_norms, dtype=np.float32) if parameter_layer_norms else None,
-            level,
-            hist_max_points,
-        )
-        _collect_structure_metrics(metrics, debug, data, level, hist_max_points)
-        metrics.update(
-            _classification_metrics(
-                output.detach().float(),
-                eval_targets.detach(),
-                n_out=n_out,
-            )
-        )
-        _collect_seed_stability_metrics(
-            metrics,
-            model,
-            data,
-            targets,
-            single_eval_pos,
-            criterion,
-            device,
-            n_out,
-            base_seed,
-            was_training,
-        )
         return metrics
     finally:
         optimizer.zero_grad()

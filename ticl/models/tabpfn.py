@@ -28,7 +28,8 @@ class TabPFN(nn.Module):
         )
         self.transformer_encoder =  TransformerEncoderSimple(encoder_layer_creator, nlayers)
         backbone_size = sum(p.numel() for p in self.transformer_encoder.parameters())
-        if wandb.run: wandb.log({"backbone_size": backbone_size})
+        if wandb.run:
+            wandb.log({"backbone_size": backbone_size}, step=0)
         print("Number of parameters in backbone: ", backbone_size)
 
         self.emsize = emsize

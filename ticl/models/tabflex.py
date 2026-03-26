@@ -52,7 +52,8 @@ class TabFlex(nn.Module):
             feature_map = feature_map,
         )
         backbone_size = sum(p.numel() for p in self.linear_attention.parameters())
-        if wandb.run: wandb.log({"backbone_size": backbone_size})
+        if wandb.run:
+            wandb.log({"backbone_size": backbone_size}, step=0)
         print("Number of parameters in backbone: ", backbone_size)
 
         self.emsize = emsize

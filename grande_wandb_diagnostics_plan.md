@@ -10,6 +10,7 @@
 
 - Add new `mothernet` config / CLI flags:
   - `grande_diagnostics: bool = False`
+  - `grande_diagnostics_gradients: bool = False`
   - `grande_diagnostics_level: {"scalars","scalars_small_hists","full_hists"} = "scalars_small_hists"`
   - `grande_diagnostics_seed: int = 0`
   - `grande_diagnostics_hist_max_points: int = 2048`
@@ -18,7 +19,7 @@
 
 ## Implementation Changes
 
-- Introduce a dedicated diagnostics helper for `child_model="grande"` that can run a forward/backward pass on a cached batch without stepping the optimizer.
+- Introduce a dedicated diagnostics helper for `child_model="grande"` that can always run a forward-only pass on a cached batch and can optionally run a separate backward pass for gradient metrics without stepping the optimizer.
 - At train startup, before the loop:
   - Save Python / NumPy / Torch RNG states.
   - Build one deterministic diagnostic batch from the dataloader using `grande_diagnostics_seed`.
@@ -54,6 +55,12 @@
   - run with `optimizer.zero_grad()` before and after
   - no optimizer step, no scheduler step, no checkpoint side effects
   - no change to standard training outputs when diagnostics are disabled
+
+## Follow-Up Note
+
+- Gradient diagnostics are currently split behind `grande_diagnostics_gradients` and default to off.
+- Reason: the separate epoch-0 diagnostic backward still triggers a CUDA `invalid argument` failure on the factorized GRANDE smoke run, while all forward-only diagnostics are stable and sufficient for the current collapse/diversity debugging goals.
+- Follow-up: isolate the exact GPU backward failure path and re-enable gradient diagnostics in smoke jobs once that root cause is fixed.
 
 ## Test Plan
 
