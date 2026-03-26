@@ -251,6 +251,7 @@ class TransformerEncoderSimple(Module):
         self, 
         src: Tensor, 
         mask: Optional[Tensor] = None, 
+        return_layer_outputs: bool = False,
     ) -> Tensor:
         r"""Pass the input through the encoder layers in turn.
 
@@ -263,13 +264,18 @@ class TransformerEncoderSimple(Module):
         """
         output = src
 
+        layer_outputs = [] if return_layer_outputs else None
         for mod in self.layers:
             output = mod(
                 output, 
                 src_mask=mask,
             )
+            if return_layer_outputs:
+                layer_outputs.append(output)
 
         if self.norm is not None:
             output = self.norm(output)
 
+        if return_layer_outputs:
+            return output, layer_outputs
         return output

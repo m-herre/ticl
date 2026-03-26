@@ -9,6 +9,7 @@
 - `continue_gradtree.sh` — SLURM job script for training/continuing GRANDE MotherNet runs
 - `environment.yml` — Conda environment spec for the main `ticl` environment
 - `grande.py` — Standalone GRANDE implementation (reference differentiable tree ensemble)
+- `grande_wandb_diagnostics_plan.md` — Implementation plan for per-epoch W&B diagnostics, initialization logging, and backbone/decoder gradient tracking for GRANDE MotherNet
 - `mothernet_grande_decoder_analysis.md` — Analysis of why predicting GRANDE params is harder than MLP params
 - `mothernet_train.sh` — SLURM job script for default MotherNet (MLP child) training
 - `setup.cfg` — Python package config: package discovery and flake8 settings

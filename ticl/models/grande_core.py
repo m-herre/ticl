@@ -280,6 +280,7 @@ def grande_forward(
     dropout=0.0,
     missing_values=True,
     straight_through=False,
+    return_debug=False,
 ):
     dtype = x.dtype
     x_local = gather_estimator_features(x, features_by_estimator)
@@ -336,4 +337,12 @@ def grande_forward(
     per_estimator_logits = torch.einsum(
         "belo,sbel->sbeo", leaf_classes, weighted_paths
     )
-    return per_estimator_logits.sum(dim=2)
+    logits = per_estimator_logits.sum(dim=2)
+    if return_debug:
+        return logits, {
+            "split_soft": split_soft,
+            "node_soft": node_soft,
+            "path_probs": path_probs,
+            "estimator_weights_softmax": estimator_weights_softmax,
+        }
+    return logits

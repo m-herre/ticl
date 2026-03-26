@@ -238,6 +238,10 @@ def get_mothernet_config():
             "grande_split_temperature_end": 1.0,
             "grande_split_temperature_anneal_steps": 0,
             "grande_profile": False,
+            "grande_diagnostics": False,
+            "grande_diagnostics_level": "scalars_small_hists",
+            "grande_diagnostics_seed": 0,
+            "grande_diagnostics_hist_max_points": 2048,
         }
     }
 

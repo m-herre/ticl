@@ -920,8 +920,16 @@ class GrandeDecoder(nn.Module):
                 nn.init.normal_(layer.weight, mean=0.0, std=0.05)
                 nn.init.normal_(layer.bias, mean=0.0, std=0.05)
 
-    def _current_split_temperature(self, device):
-        if not self.training:
+    def _current_split_temperature(
+        self,
+        *,
+        device,
+        use_training_schedule=None,
+        advance=True,
+    ):
+        if use_training_schedule is None:
+            use_training_schedule = self.training
+        if not use_training_schedule:
             temperature = self.grande_split_temperature_end
         elif (
             self.grande_split_temperature_anneal_steps <= 0
@@ -938,8 +946,16 @@ class GrandeDecoder(nn.Module):
             temperature = self.grande_split_temperature_start + progress * (
                 self.grande_split_temperature_end - self.grande_split_temperature_start
             )
-            self.split_temperature_step.add_(1)
+            if advance:
+                self.split_temperature_step.add_(1)
         return torch.tensor(temperature, device=device, dtype=torch.float32)
+
+    def peek_split_temperature(self, *, device, use_training_schedule=None):
+        return self._current_split_temperature(
+            device=device,
+            use_training_schedule=use_training_schedule,
+            advance=False,
+        )
 
     def _decode_factorized_stats(
         self, decoder_input_flat, *, batch_size, feature_stats
@@ -978,7 +994,15 @@ class GrandeDecoder(nn.Module):
         return split_values, split_index_logits, estimator_weights, leaf_classes
 
     def _decode_depthwise_factorized_stats(
-        self, decoder_input_flat, *, batch_size, feature_stats, dtype, device
+        self,
+        decoder_input_flat,
+        *,
+        batch_size,
+        feature_stats,
+        dtype,
+        device,
+        advance_split_temperature=True,
+        use_training_schedule=None,
     ):
         base_context = torch.tanh(self.depthwise_context_proj(decoder_input_flat)).view(
             batch_size, self.n_estimators, self.hidden_size
@@ -1000,7 +1024,11 @@ class GrandeDecoder(nn.Module):
 
         mu = feature_stats[..., 0]
         sigma = feature_stats[..., 1].clamp_min(1e-3)
-        split_temperature = self._current_split_temperature(device=device)
+        split_temperature = self._current_split_temperature(
+            device=device,
+            use_training_schedule=use_training_schedule,
+            advance=advance_split_temperature,
+        )
 
         split_value_levels = []
         split_index_levels = []
@@ -1102,7 +1130,13 @@ class GrandeDecoder(nn.Module):
 
         split_values = torch.cat(split_value_levels, dim=2)
         split_index_logits = torch.cat(split_index_levels, dim=2)
-        return split_values, split_index_logits, estimator_weights, leaf_classes
+        return (
+            split_values,
+            split_index_logits,
+            estimator_weights,
+            leaf_classes,
+            split_temperature,
+        )
 
     def build_context(self, *, batch_size, num_features_used, device, seed=None):
         return build_grande_context(
@@ -1114,7 +1148,18 @@ class GrandeDecoder(nn.Module):
             seed=seed,
         )
 
-    def forward(self, x, y_src, x_train_raw, context, seed=None, return_profile=False):
+    def forward(
+        self,
+        x,
+        y_src,
+        x_train_raw,
+        context,
+        seed=None,
+        return_profile=False,
+        return_debug=False,
+        advance_split_temperature=True,
+        use_training_schedule=None,
+    ):
         batch_size = x.shape[1]
         x_summary = self.summary_layer(x, y_src)
         timings = {} if return_profile else None
@@ -1206,16 +1251,46 @@ class GrandeDecoder(nn.Module):
                 )
             )
         else:
-            split_values, split_index_logits, estimator_weights, leaf_classes = (
+            (
+                split_values,
+                split_index_logits,
+                estimator_weights,
+                leaf_classes,
+                split_temperature,
+            ) = (
                 self._decode_depthwise_factorized_stats(
                     decoder_input_flat,
                     batch_size=batch_size,
                     feature_stats=feature_stats,
                     dtype=x.dtype,
                     device=x.device,
+                    advance_split_temperature=advance_split_temperature,
+                    use_training_schedule=use_training_schedule,
                 )
             )
 
+        if self.grande_decoder_variant != "depthwise_factorized_stats":
+            split_temperature = torch.tensor(
+                1.0,
+                device=x.device,
+                dtype=torch.float32,
+            )
+
+        debug = None
+        if return_debug:
+            debug = {
+                "feature_stats": feature_stats,
+                "split_temperature": split_temperature,
+            }
+
+        if return_profile and return_debug:
+            return (
+                split_values,
+                split_index_logits,
+                estimator_weights,
+                leaf_classes,
+                {"timings": timings, **debug},
+            )
         if return_profile:
             return (
                 split_values,
@@ -1223,5 +1298,13 @@ class GrandeDecoder(nn.Module):
                 estimator_weights,
                 leaf_classes,
                 timings,
+            )
+        if return_debug:
+            return (
+                split_values,
+                split_index_logits,
+                estimator_weights,
+                leaf_classes,
+                debug,
             )
         return split_values, split_index_logits, estimator_weights, leaf_classes

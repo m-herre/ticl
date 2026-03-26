@@ -421,6 +421,27 @@ def argparser_from_config(parser, description="Train Mothernet"):
             type=str2bool,
             help="Whether to record per-epoch GRANDE timing breakdowns for context, stats, decoder, and forward.",
         )
+        mothernet.add_argument(
+            "--grande-diagnostics",
+            type=str2bool,
+            help="Whether to log epoch-0 and per-epoch GRANDE diagnostics to W&B.",
+        )
+        mothernet.add_argument(
+            "--grande-diagnostics-level",
+            type=str,
+            choices=["scalars", "scalars_small_hists", "full_hists"],
+            help="Logging depth for GRANDE diagnostics.",
+        )
+        mothernet.add_argument(
+            "--grande-diagnostics-seed",
+            type=int,
+            help="Seed used for the cached GRANDE diagnostic snapshot and diagnostic context sampling.",
+        )
+        mothernet.add_argument(
+            "--grande-diagnostics-hist-max-points",
+            type=int,
+            help="Maximum number of values retained per GRANDE diagnostic histogram.",
+        )
         mothernet.set_defaults(**config["mothernet"])
 
     if model_type in ["additive", "baam"]:

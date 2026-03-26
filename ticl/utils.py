@@ -450,8 +450,16 @@ def make_training_callback(
                 mlflow.log_metric(key="wallclock_ticker", value=wallclock_ticker, step=epoch)
                 mlflow.log_metric(key="epoch", value=epoch, step=epoch)
             if wandb.run is not None:
-                wandb.log({"loss": model.losses[-1], "learning_rate": model.learning_rates[-1], "wallclock_time": model.wallclock_times[-1],
-                           "wallclock_ticker": wallclock_ticker, "epoch": epoch})
+                wandb.log(
+                    {
+                        "loss": model.losses[-1],
+                        "learning_rate": model.learning_rates[-1],
+                        "wallclock_time": model.wallclock_times[-1],
+                        "wallclock_ticker": wallclock_ticker,
+                        "epoch": epoch,
+                    },
+                    step=epoch,
+                )
             if report is not None:
                 # synetune callback
                 report(epoch=epoch, loss=model.losses[-1], wallclock_time=wallclock_ticker)  # every 5 minutes
@@ -526,7 +534,7 @@ def make_training_callback(
                         
                         for dataset, score in per_dataset_score.items():
                             val_metrics[f"val_score_{dataset}"] = score
-                        wandb.log(val_metrics)
+                        wandb.log(val_metrics, step=epoch)
                 # remove checkpoints that are worse than current
                 if epoch - save_every > 0:
                     this_loss = model.losses[-1]

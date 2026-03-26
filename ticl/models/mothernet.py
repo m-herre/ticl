@@ -34,6 +34,22 @@ def entmax15(**kwargs):
 
 
 class ModelPredictor(nn.Module):
+    @staticmethod
+    def _retain_gradients(tensors):
+        if tensors is None:
+            return
+        if torch.is_tensor(tensors):
+            if tensors.requires_grad:
+                tensors.retain_grad()
+            return
+        if isinstance(tensors, dict):
+            for value in tensors.values():
+                ModelPredictor._retain_gradients(value)
+            return
+        if isinstance(tensors, (list, tuple)):
+            for value in tensors:
+                ModelPredictor._retain_gradients(value)
+
     def _grande_profile_active(self):
         return self.child_model == "grande" and getattr(self, "grande_profile", False)
 
@@ -128,7 +144,15 @@ class ModelPredictor(nn.Module):
 
         return y_hat_estimators.mean(dim=2)  # (t, b, n_out)
 
-    def forward(self, src, single_eval_pos=None):
+    def forward(
+        self,
+        src,
+        single_eval_pos=None,
+        return_debug=False,
+        grande_context_seed=None,
+        advance_split_temperature=True,
+        grande_use_training_schedule=None,
+    ):
         assert isinstance(
             src, tuple
         ), "inputs (src) have to be given as (x,y) or (style,x,y) tuple"
@@ -161,7 +185,14 @@ class ModelPredictor(nn.Module):
             enc_train = torch.cat([repeated_class_tokens, enc_train], 0)
 
         # Run transformer
-        output = self.inner_forward(enc_train)
+        layer_outputs = None
+        if return_debug:
+            output, layer_outputs = self.inner_forward(
+                enc_train,
+                return_layer_outputs=True,
+            )
+        else:
+            output = self.inner_forward(enc_train)
 
         if self.child_model == "mlp":
             (b1, w1), *layers = self.decoder(output, y[:single_eval_pos])
@@ -215,6 +246,7 @@ class ModelPredictor(nn.Module):
                 batch_size=x.shape[1],
                 num_features_used=num_features_used,
                 device=x.device,
+                seed=grande_context_seed,
             )
             self._stop_grande_timer("grande_context_s", context_start, x.device)
             decoder_out = self.decoder(
@@ -222,9 +254,30 @@ class ModelPredictor(nn.Module):
                 y[:single_eval_pos],
                 x[:single_eval_pos],
                 context,
+                seed=grande_context_seed,
                 return_profile=self._grande_profile_active(),
+                return_debug=return_debug,
+                advance_split_temperature=advance_split_temperature,
+                use_training_schedule=grande_use_training_schedule,
             )
-            if self._grande_profile_active():
+            decoder_debug = None
+            if self._grande_profile_active() and return_debug:
+                (
+                    split_values,
+                    split_index_logits,
+                    estimator_weights,
+                    leaf_classes,
+                    decoder_extra,
+                ) = decoder_out
+                decoder_timings = decoder_extra["timings"]
+                decoder_debug = {
+                    key: value for key, value in decoder_extra.items() if key != "timings"
+                }
+                for name, value in decoder_timings.items():
+                    self.grande_profile_totals[name] = (
+                        self.grande_profile_totals.get(name, 0.0) + value
+                    )
+            elif self._grande_profile_active():
                 (
                     split_values,
                     split_index_logits,
@@ -236,10 +289,18 @@ class ModelPredictor(nn.Module):
                     self.grande_profile_totals[name] = (
                         self.grande_profile_totals.get(name, 0.0) + value
                     )
+            elif return_debug:
+                (
+                    split_values,
+                    split_index_logits,
+                    estimator_weights,
+                    leaf_classes,
+                    decoder_debug,
+                ) = decoder_out
             else:
                 split_values, split_index_logits, estimator_weights, leaf_classes = decoder_out
             forward_start = self._start_grande_timer(x.device)
-            h = grande_forward(
+            grande_out = grande_forward(
                 x=x[single_eval_pos:],
                 split_values=split_values,
                 split_index_logits=split_index_logits,
@@ -253,10 +314,15 @@ class ModelPredictor(nn.Module):
                 dropout=self.decoder.grande_dropout,
                 missing_values=self.decoder.missing_values,
                 straight_through=True,
+                return_debug=return_debug,
             )
             self._stop_grande_timer("grande_forward_s", forward_start, x.device)
             if self._grande_profile_active():
                 self.grande_profile_steps += 1
+            if return_debug:
+                h, grande_debug = grande_out
+            else:
+                h = grande_out
 
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
@@ -264,6 +330,41 @@ class ModelPredictor(nn.Module):
         if h.isnan().all():
             print("NAN")
             raise ValueError("NAN")
+        if return_debug:
+            debug = {
+                "encoder_output": enc_train,
+                "transformer_layer_outputs": layer_outputs or [],
+                "transformer_output": output,
+                "single_eval_pos": single_eval_pos,
+            }
+            if self.child_model == "grande":
+                debug.update(
+                    {
+                        "split_values": split_values,
+                        "split_index_logits": split_index_logits,
+                        "estimator_weights": estimator_weights,
+                        "leaf_classes": leaf_classes,
+                        "features_by_estimator": context["features_by_estimator"],
+                        "feature_mask": context["feature_mask"],
+                        "num_features_used": int(num_features_used),
+                        "tree_depth": self.decoder.tree_depth,
+                    }
+                )
+                if decoder_debug is not None:
+                    debug.update(decoder_debug)
+                debug.update(grande_debug)
+                self._retain_gradients(
+                    [
+                        debug["encoder_output"],
+                        debug["transformer_output"],
+                        debug["transformer_layer_outputs"],
+                        debug["split_values"],
+                        debug["split_index_logits"],
+                        debug["estimator_weights"],
+                        debug["leaf_classes"],
+                    ]
+                )
+            return h, debug
         return h
 
 
@@ -314,12 +415,20 @@ class MotherNet(ModelPredictor):
         grande_split_temperature_end=1.0,
         grande_split_temperature_anneal_steps=0,
         grande_profile=False,
+        grande_diagnostics=False,
+        grande_diagnostics_level="scalars_small_hists",
+        grande_diagnostics_seed=0,
+        grande_diagnostics_hist_max_points=2048,
     ):
         super().__init__()
         self.child_model = child_model
         self.classification_task = classification_task
         self.tree_depth = tree_depth
         self.grande_profile = grande_profile
+        self.grande_diagnostics = grande_diagnostics
+        self.grande_diagnostics_level = grande_diagnostics_level
+        self.grande_diagnostics_seed = grande_diagnostics_seed
+        self.grande_diagnostics_hist_max_points = grande_diagnostics_hist_max_points
         self.reset_grande_profile()
 
         # decoder activation = "relu" is legacy behavior
@@ -438,5 +547,8 @@ class MotherNet(ModelPredictor):
                     nn.init.zeros_(attn.out_proj.weight)
                     nn.init.zeros_(attn.out_proj.bias)
 
-    def inner_forward(self, train_x):
-        return self.transformer_encoder(train_x)
+    def inner_forward(self, train_x, return_layer_outputs=False):
+        return self.transformer_encoder(
+            train_x,
+            return_layer_outputs=return_layer_outputs,
+        )

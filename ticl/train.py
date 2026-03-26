@@ -183,12 +183,44 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
         gpu_start_time = torch.cuda.Event(enable_timing=True)
         gpu_end_time = torch.cuda.Event(enable_timing=True)
 
+    profile_model = model.module if hasattr(model, "module") else model
+    grande_diagnostics_enabled = (
+        rank == 0
+        and getattr(profile_model, "child_model", None) == "grande"
+        and getattr(profile_model, "grande_diagnostics", False)
+    )
+    grande_diagnostics_snapshot = None
+    if grande_diagnostics_enabled:
+        from ticl.grande_diagnostics import (
+            prepare_grande_diagnostic_snapshot,
+            run_grande_diagnostics,
+        )
+
+        grande_diagnostics_snapshot = prepare_grande_diagnostic_snapshot(
+            dl,
+            seed=getattr(profile_model, "grande_diagnostics_seed", 0),
+        )
+        if wandb.run:
+            init_metrics = run_grande_diagnostics(
+                model=profile_model,
+                snapshot=grande_diagnostics_snapshot,
+                criterion=criterion,
+                optimizer=optimizer,
+                device=device,
+                n_out=n_out,
+                epoch=max(start_epoch - 1, 0),
+                level=getattr(profile_model, "grande_diagnostics_level", "scalars_small_hists"),
+                hist_max_points=getattr(profile_model, "grande_diagnostics_hist_max_points", 2048),
+                base_seed=getattr(profile_model, "grande_diagnostics_seed", 0),
+            )
+            if init_metrics:
+                wandb.log(init_metrics, step=max(start_epoch - 1, 0))
+
     try:
         train_time, inference_time, train_gpu_time = [], [], []
         for epoch in range(start_epoch, epochs + 1):
             if verbose:
                 print(f"start of epoch {epoch}")
-            profile_model = model.module if hasattr(model, "module") else model
             if hasattr(profile_model, "reset_grande_profile"):
                 profile_model.reset_grande_profile()
 
@@ -223,26 +255,42 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
             else:
                 train_gpu_time.append(0)
 
+            grande_profile_stats = {}
+            if hasattr(profile_model, "get_grande_profile_stats"):
+                grande_profile_stats = profile_model.get_grande_profile_stats(reset=True)
+            wandb_metrics = {
+                "avg_train_time": sum(train_time) / len(train_time),
+                "train_time": train_time[-1],
+                "avg_train_gpu_time": sum(train_gpu_time) / len(train_gpu_time),
+                "train_gpu_time": train_gpu_time[-1],
+                "avg_batch_loss": float(train_metrics["batch_loss"]),
+                "train_train_sample_number": train_metrics["train_train_sample_number"],
+                "train_test_sample_number": train_metrics["train_test_sample_number"],
+            }
+            wandb_metrics.update(grande_profile_stats)
+
+            if grande_diagnostics_enabled and wandb.run:
+                diagnostics_metrics = run_grande_diagnostics(
+                    model=profile_model,
+                    snapshot=grande_diagnostics_snapshot,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                    device=device,
+                    n_out=n_out,
+                    epoch=epoch,
+                    level=getattr(profile_model, "grande_diagnostics_level", "scalars_small_hists"),
+                    hist_max_points=getattr(profile_model, "grande_diagnostics_hist_max_points", 2048),
+                    base_seed=getattr(profile_model, "grande_diagnostics_seed", 0),
+                )
+                wandb_metrics.update(diagnostics_metrics)
+
+            if wandb.run:
+                wandb.log(wandb_metrics, step=epoch)
+
             if verbose:
                 print('-' * 89)
                 print(
                     f'| end of epoch {epoch:3d} | Wallclock time: {train_time[-1]:5.2f}s | GPU time: {train_gpu_time[-1]:5.2f}s | mean loss {total_loss:5.4f} | ')
-
-                grande_profile_stats = {}
-                if hasattr(profile_model, "get_grande_profile_stats"):
-                    grande_profile_stats = profile_model.get_grande_profile_stats(reset=True)
-                if wandb.run:
-                    wandb_metrics = {
-                        "avg_train_time": sum(train_time) / len(train_time),
-                        "train_time": train_time[-1],
-                        "avg_train_gpu_time": sum(train_gpu_time) / len(train_gpu_time),
-                        "train_gpu_time": train_gpu_time[-1],
-                        "avg_batch_loss": float(train_metrics["batch_loss"]),
-                        "train_train_sample_number": train_metrics["train_train_sample_number"],
-                        "train_test_sample_number": train_metrics["train_test_sample_number"],
-                    }
-                    wandb_metrics.update(grande_profile_stats)
-                    wandb.log(wandb_metrics)
 
                 if grande_profile_stats:
                     print(
@@ -293,7 +341,13 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 if output: 
                     inference_time.append(output)
                     if wandb.run:
-                        wandb.log({"avg_inference_time": sum(inference_time)/len(inference_time), "inference_time": inference_time[-1]})
+                        wandb.log(
+                            {
+                                "avg_inference_time": sum(inference_time)/len(inference_time),
+                                "inference_time": inference_time[-1],
+                            },
+                            step=epoch,
+                        )
 
 
     except KeyboardInterrupt:
