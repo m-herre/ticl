@@ -116,6 +116,16 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
           spike_tolerance=4, progress_bar=False,
           ):
     using_dist, rank, device = init_dist(device)
+
+    # Disable flash SDP on non-A100/H100 GPUs — PyTorch's flash attention kernel
+    # requires exactly SM80 or SM90, and fails on e.g. A40 (SM86).
+    if device != 'cpu:0' and torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        if capability not in ((8, 0), (9, 0)):
+            torch.backends.cuda.enable_flash_sdp(False)
+            if rank == 0 and verbose:
+                print(f"GPU SM{capability[0]}{capability[1]}: disabled flash SDP (requires SM80/SM90)")
+
     if rank == 0 and verbose:
         print(f'Using {device} device')
 

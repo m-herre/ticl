@@ -169,7 +169,7 @@ def init_dist(device):
         print(f"Distributed training on {torch.cuda.device_count()} GPUs, this is rank {rank}, "
               "only I can print, but when using print(..., force=True) it will print on all ranks.")
         return True, rank, f'cuda:{rank}'
-    elif 'SLURM_PROCID' in os.environ and torch.cuda.device_count() > 1:
+    elif 'SLURM_PROCID' in os.environ and torch.cuda.device_count() > 1 and int(os.environ.get('SLURM_NTASKS', '1')) > 1:
         # this is for multi gpu when starting with submitit
         assert device != 'cpu:0'
         rank = int(os.environ['SLURM_PROCID'])
