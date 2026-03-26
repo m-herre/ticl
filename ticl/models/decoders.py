@@ -1,4 +1,5 @@
 import time
+from contextlib import nullcontext
 
 import torch
 from torch import nn
@@ -1117,10 +1118,21 @@ class GrandeDecoder(nn.Module):
             parent_hidden = current_states.unsqueeze(3).expand(
                 batch_size, self.n_estimators, nodes_at_depth, 2, self.hidden_size
             )
-            child_states = self.depthwise_state_cell(
-                gru_input.reshape(-1, gru_input.shape[-1]),
-                parent_hidden.reshape(-1, self.hidden_size),
+            gru_input_flat = gru_input.reshape(-1, gru_input.shape[-1])
+            parent_hidden_flat = parent_hidden.reshape(-1, self.hidden_size)
+            autocast_context = (
+                torch.autocast(device_type=device.type, enabled=False)
+                if device.type != "cpu"
+                else nullcontext()
             )
+            # CUDA's fused GRUCell kernel on this stack does not support bf16, so
+            # keep the recurrent state update in fp32 and cast back afterward.
+            with autocast_context:
+                child_states = self.depthwise_state_cell(
+                    gru_input_flat.float(),
+                    parent_hidden_flat.float(),
+                )
+            child_states = child_states.to(dtype=dtype)
             current_states = child_states.view(
                 batch_size,
                 self.n_estimators,

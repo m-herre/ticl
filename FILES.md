@@ -9,11 +9,14 @@
 - `continue_gradtree.sh` — SLURM job script for training/continuing GRANDE MotherNet runs
 - `environment.yml` — Conda environment spec for the main `ticl` environment
 - `grande.py` — Standalone GRANDE implementation (reference differentiable tree ensemble)
+- `grande_diagnostics_metric_reference.md` — Reference for all tracked GRANDE diagnostics metrics, including per-prefix explanations and interpretation notes
 - `grande_wandb_diagnostics_plan.md` — Implementation plan for per-epoch W&B diagnostics, initialization logging, and backbone/decoder gradient tracking for GRANDE MotherNet
 - `mothernet_grande_decoder_analysis.md` — Analysis of why predicting GRANDE params is harder than MLP params
 - `mothernet_train.sh` — SLURM job script for default MotherNet (MLP child) training
 - `setup.cfg` — Python package config: package discovery and flake8 settings
 - `setup.py` — Minimal setuptools entry point
+- `submit_grande_depthwise_diagnostics.sh` — SLURM submit script for GRANDE MotherNet depthwise runs with W&B and per-epoch GRANDE diagnostics enabled
+- `submit_grande_factorized_diagnostics.sh` — SLURM submit script for GRANDE MotherNet factorized runs with W&B and per-epoch GRANDE diagnostics enabled
 - `tabflex_conda.yaml` — Conda environment spec for TabFlex (PyTorch 2.0, CUDA 11.8)
 - `tabflex_conda_update.yaml` — Updated TabFlex conda environment with pinned versions
 
