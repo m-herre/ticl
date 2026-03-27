@@ -38,7 +38,9 @@ def _make_grande_batch():
     return ((info, x, y), y.clone(), single_eval_pos)
 
 
-def _make_grande_model(*, diagnostics=False, diagnostics_gradients=False):
+def _make_grande_model(
+    *, diagnostics=False, diagnostics_gradients=False, diversity_loss_weight=0.0
+):
     return MotherNet(
         n_out=3,
         emsize=16,
@@ -64,6 +66,7 @@ def _make_grande_model(*, diagnostics=False, diagnostics_gradients=False):
         grande_diagnostics_level="scalars_small_hists",
         grande_diagnostics_seed=7,
         grande_diagnostics_hist_max_points=128,
+        grande_diversity_loss_weight=diversity_loss_weight,
     )
 
 
@@ -145,6 +148,11 @@ def test_run_grande_diagnostics_forward_only_skips_gradient_metrics():
     assert metrics["grande_diagnostics/meta/gradient_metrics_enabled"] == 0.0
     assert "grande_diagnostics/thresholds/depth_0/zscore_abs_mean" in metrics
     assert "grande_diagnostics/diversity/effective_dim_95" in metrics
+    assert "grande_diagnostics/diversity/combined_decoder_output_cosine_mean" in metrics
+    assert (
+        "grande_diagnostics/diversity/combined_decoder_output_positive_cosine_mean"
+        in metrics
+    )
     assert "grande_diagnostics/gradients/params/backbone/l2_norm" not in metrics
     assert "grande_diagnostics/gradients/activations/transformer_output/l2_norm" not in metrics
     assert (
@@ -232,3 +240,41 @@ def test_train_logs_grande_diagnostics_at_epoch_zero_and_each_epoch(monkeypatch)
     ]
 
     assert diagnostic_steps == [0, 1, 2]
+
+
+def test_train_logs_grande_diversity_loss_terms_when_enabled(monkeypatch):
+    logs = []
+
+    def fake_log(payload, step=None):
+        logs.append((payload, step))
+
+    monkeypatch.setattr(wandb, "run", object())
+    monkeypatch.setattr(wandb, "log", fake_log)
+
+    model = _make_grande_model(diversity_loss_weight=0.2)
+    loader = _SingleBatchLoader(_make_grande_batch())
+    criterion = nn.CrossEntropyLoss(reduction="none")
+
+    train(
+        loader,
+        model,
+        criterion=criterion,
+        epochs=2,
+        learning_rate=1e-3,
+        min_lr=1e-4,
+        warmup_epochs=1,
+        device="cpu",
+        progress_bar=False,
+        verbose=False,
+    )
+
+    epoch_payloads = [
+        payload for payload, step in logs if step == 1 and "avg_batch_loss" in payload
+    ]
+
+    assert len(epoch_payloads) == 1
+    payload = epoch_payloads[0]
+    assert "avg_task_loss" in payload
+    assert "avg_grande_diversity_loss" in payload
+    assert "avg_grande_diversity_loss_weighted" in payload
+    assert payload["avg_grande_diversity_loss"] >= 0.0

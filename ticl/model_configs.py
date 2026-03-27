@@ -292,6 +292,7 @@ def get_shared_defaults(encoder_type="transformer"):
 def get_mothernet_default_config():
     config = get_shared_defaults()
     config.update(get_mothernet_config())
+    config["mothernet"]["grande_diversity_loss_weight"] = 0.0
     return config
 
 

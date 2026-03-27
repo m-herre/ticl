@@ -447,6 +447,12 @@ def argparser_from_config(parser, description="Train Mothernet"):
             type=int,
             help="Maximum number of values retained per GRANDE diagnostic histogram.",
         )
+        if model_type == "mothernet":
+            mothernet.add_argument(
+                "--grande-diversity-loss-weight",
+                type=float,
+                help="Opt-in weight for the factorized GRANDE per-estimator diversity loss.",
+            )
         mothernet.set_defaults(**config["mothernet"])
 
     if model_type in ["additive", "baam"]:

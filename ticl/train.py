@@ -44,7 +44,15 @@ def train_epoch(
     progress_bar=False
 ):
     model.train()  # Turn on the train mode
+    profile_model = model.module if hasattr(model, "module") else model
+    grande_diversity_weight = float(
+        getattr(profile_model, "grande_diversity_loss_weight", 0.0)
+    )
+    collect_aux_losses = grande_diversity_weight > 0.0
     total_loss = torch.tensor(0., device = device)
+    total_task_loss = torch.tensor(0.0, device=device)
+    total_grande_diversity_loss = torch.tensor(0.0, device=device)
+    total_grande_diversity_loss_weighted = torch.tensor(0.0, device=device)
     nan_steps = torch.tensor(0., device = device)
     ignore_steps = torch.tensor(0., device = device)
     train_eval_pos_sum = 0.0
@@ -69,20 +77,29 @@ def train_epoch(
                 # for mothernet, la_mothernet, model is MLPModelPredictor from ticl.py
                 output = model(
                     tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
-                    if isinstance(data, tuple) else data.to(device), 
-                    single_eval_pos=single_eval_pos
+                    if isinstance(data, tuple) else data.to(device),
+                    single_eval_pos=single_eval_pos,
+                    return_aux=collect_aux_losses,
                 )
+                aux_losses = {}
+                if collect_aux_losses:
+                    output, aux_losses = output
 
                 if single_eval_pos is not None:
                     targets = targets[single_eval_pos:]
-                loss, nan_share = eval_criterion(
+                task_loss, nan_share = eval_criterion(
                     criterion, 
                     targets, 
                     output, 
                     device=device, 
                     n_out=n_out
                 )
-                loss = loss / aggregate_k_gradients
+                weighted_aux_loss = task_loss.new_zeros(())
+                if collect_aux_losses and "grande_diversity_loss" in aux_losses:
+                    weighted_aux_loss = (
+                        aux_losses["grande_diversity_loss"] * grande_diversity_weight
+                    )
+                loss = (task_loss + weighted_aux_loss) / aggregate_k_gradients
 
             loss.backward()
 
@@ -95,17 +112,35 @@ def train_epoch(
                 raise ValueError("NAN loss encountered")
             else:
                 total_loss += loss.mean().cpu().detach().item()
+                total_task_loss += task_loss.mean().cpu().detach().item()
+                if collect_aux_losses and "grande_diversity_loss" in aux_losses:
+                    total_grande_diversity_loss += (
+                        aux_losses["grande_diversity_loss"].detach().cpu().item()
+                    )
+                    total_grande_diversity_loss_weighted += (
+                        weighted_aux_loss.detach().cpu().item()
+                    )
             nan_steps += nan_share
             ignore_steps += (targets == -100).float().mean()
-            
+
+    train_metrics = {
+        "batch_loss": total_loss / steps_per_epoch * aggregate_k_gradients,
+        "train_train_sample_number": train_eval_pos_sum / steps_per_epoch,
+        "train_test_sample_number": test_eval_pos_sum / steps_per_epoch,
+    }
+    if collect_aux_losses:
+        train_metrics["task_loss"] = total_task_loss / steps_per_epoch
+        train_metrics["grande_diversity_loss"] = (
+            total_grande_diversity_loss / steps_per_epoch
+        )
+        train_metrics["grande_diversity_loss_weighted"] = (
+            total_grande_diversity_loss_weighted / steps_per_epoch
+        )
+
     return (total_loss / steps_per_epoch * aggregate_k_gradients,
             nan_steps.cpu().item() / steps_per_epoch,
             ignore_steps.cpu().item()/steps_per_epoch,
-            {
-                "batch_loss": total_loss / steps_per_epoch * aggregate_k_gradients,
-                "train_train_sample_number": train_eval_pos_sum / steps_per_epoch,
-                "train_test_sample_number": test_eval_pos_sum / steps_per_epoch,
-            })
+            train_metrics)
 
 
 def train(dl, model, criterion, optimizer_state=None, scheduler=None,
@@ -278,6 +313,14 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 "train_train_sample_number": train_metrics["train_train_sample_number"],
                 "train_test_sample_number": train_metrics["train_test_sample_number"],
             }
+            if "task_loss" in train_metrics:
+                wandb_metrics["avg_task_loss"] = float(train_metrics["task_loss"])
+                wandb_metrics["avg_grande_diversity_loss"] = float(
+                    train_metrics["grande_diversity_loss"]
+                )
+                wandb_metrics["avg_grande_diversity_loss_weighted"] = float(
+                    train_metrics["grande_diversity_loss_weighted"]
+                )
             wandb_metrics.update(grande_profile_stats)
 
             if grande_diagnostics_enabled and wandb.run:

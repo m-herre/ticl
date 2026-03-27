@@ -160,6 +160,32 @@ def gather_estimator_features(x, features_by_estimator):
     return gathered.permute(3, 0, 1, 2)
 
 
+def flatten_grande_estimator_outputs(
+    *,
+    split_values,
+    split_index_logits,
+    estimator_weights,
+    leaf_classes,
+):
+    batch_size, n_estimators = split_values.shape[:2]
+    parts = (
+        split_values.reshape(batch_size, n_estimators, -1),
+        split_index_logits.reshape(batch_size, n_estimators, -1),
+        estimator_weights.reshape(batch_size, n_estimators, -1),
+        leaf_classes.reshape(batch_size, n_estimators, -1),
+    )
+    return torch.cat([part.float() for part in parts], dim=-1)
+
+
+def pairwise_cosine_off_diag(vectors):
+    if vectors.shape[1] <= 1:
+        return None
+    normed = F.normalize(vectors, dim=-1, eps=1e-12)
+    cosine = torch.matmul(normed, normed.transpose(-1, -2))
+    mask = ~torch.eye(vectors.shape[1], device=vectors.device, dtype=torch.bool)
+    return cosine.masked_select(mask.unsqueeze(0)).reshape(vectors.shape[0], -1)
+
+
 def _safe_mean_and_std(values, valid_mask, dim):
     valid_count = valid_mask.sum(dim=dim).clamp_min(1)
     masked_values = torch.where(valid_mask, values, torch.zeros_like(values))

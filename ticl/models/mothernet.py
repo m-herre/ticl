@@ -7,7 +7,11 @@ import torch.nn.functional as F
 
 from ticl.models.encoders import OneHotAndLinear
 from ticl.models.decoders import MLPModelDecoder, GradTreeDecoder, GrandeDecoder
-from ticl.models.grande_core import grande_forward
+from ticl.models.grande_core import (
+    flatten_grande_estimator_outputs,
+    grande_forward,
+    pairwise_cosine_off_diag,
+)
 from ticl.models.layer import TransformerEncoderLayer, TransformerEncoderSimple
 from ticl.models.encoders import Linear
 
@@ -144,11 +148,41 @@ class ModelPredictor(nn.Module):
 
         return y_hat_estimators.mean(dim=2)  # (t, b, n_out)
 
+    @staticmethod
+    def _compute_grande_diversity_aux_losses(
+        *,
+        split_values,
+        split_index_logits,
+        estimator_weights,
+        leaf_classes,
+    ):
+        combined_vectors = flatten_grande_estimator_outputs(
+            split_values=split_values,
+            split_index_logits=split_index_logits,
+            estimator_weights=estimator_weights,
+            leaf_classes=leaf_classes,
+        )
+        off_diag = pairwise_cosine_off_diag(combined_vectors)
+        zero = combined_vectors.new_zeros(())
+        if off_diag is None:
+            return {
+                "grande_diversity_loss": zero,
+                "grande_diversity_cosine_mean": zero,
+                "grande_diversity_positive_cosine_mean": zero,
+            }
+        positive_mean = off_diag.clamp_min(0).mean()
+        return {
+            "grande_diversity_loss": positive_mean,
+            "grande_diversity_cosine_mean": off_diag.mean(),
+            "grande_diversity_positive_cosine_mean": positive_mean,
+        }
+
     def forward(
         self,
         src,
         single_eval_pos=None,
         return_debug=False,
+        return_aux=False,
         grande_context_seed=None,
         advance_split_temperature=True,
         grande_use_training_schedule=None,
@@ -193,6 +227,7 @@ class ModelPredictor(nn.Module):
             )
         else:
             output = self.inner_forward(enc_train)
+        aux_losses = {}
 
         if self.child_model == "mlp":
             (b1, w1), *layers = self.decoder(output, y[:single_eval_pos])
@@ -319,6 +354,13 @@ class ModelPredictor(nn.Module):
             self._stop_grande_timer("grande_forward_s", forward_start, x.device)
             if self._grande_profile_active():
                 self.grande_profile_steps += 1
+            if return_aux and getattr(self, "grande_diversity_loss_weight", 0.0) > 0.0:
+                aux_losses = self._compute_grande_diversity_aux_losses(
+                    split_values=split_values,
+                    split_index_logits=split_index_logits,
+                    estimator_weights=estimator_weights,
+                    leaf_classes=leaf_classes,
+                )
             if return_debug:
                 h, grande_debug = grande_out
             else:
@@ -364,7 +406,11 @@ class ModelPredictor(nn.Module):
                         debug["leaf_classes"],
                     ]
                 )
+            if return_aux:
+                return h, debug, aux_losses
             return h, debug
+        if return_aux:
+            return h, aux_losses
         return h
 
 
@@ -420,6 +466,7 @@ class MotherNet(ModelPredictor):
         grande_diagnostics_level="scalars_small_hists",
         grande_diagnostics_seed=0,
         grande_diagnostics_hist_max_points=2048,
+        grande_diversity_loss_weight=0.0,
     ):
         super().__init__()
         self.child_model = child_model
@@ -431,7 +478,21 @@ class MotherNet(ModelPredictor):
         self.grande_diagnostics_level = grande_diagnostics_level
         self.grande_diagnostics_seed = grande_diagnostics_seed
         self.grande_diagnostics_hist_max_points = grande_diagnostics_hist_max_points
+        self.grande_diversity_loss_weight = float(grande_diversity_loss_weight)
         self.reset_grande_profile()
+        if self.grande_diversity_loss_weight < 0.0:
+            raise ValueError("grande_diversity_loss_weight must be non-negative")
+        if self.grande_diversity_loss_weight > 0.0 and self.child_model != "grande":
+            raise ValueError(
+                "grande_diversity_loss_weight is only supported for child_model='grande'"
+            )
+        if (
+            self.grande_diversity_loss_weight > 0.0
+            and grande_decoder_variant != "factorized_stats"
+        ):
+            raise ValueError(
+                "grande_diversity_loss_weight requires grande_decoder_variant='factorized_stats'"
+            )
 
         # decoder activation = "relu" is legacy behavior
         nhid = emsize * nhid_factor

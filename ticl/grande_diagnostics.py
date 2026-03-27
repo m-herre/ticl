@@ -5,7 +5,11 @@ import numpy as np
 import torch
 import wandb
 
-from ticl.models.grande_core import gather_estimator_features
+from ticl.models.grande_core import (
+    flatten_grande_estimator_outputs,
+    gather_estimator_features,
+    pairwise_cosine_off_diag,
+)
 import ticl.utils as utils
 
 try:
@@ -182,13 +186,17 @@ def _make_histogram(values, max_points):
 
 
 def _pairwise_cosine_mean(vectors):
-    if vectors.shape[1] <= 1:
+    off_diag = pairwise_cosine_off_diag(vectors)
+    if off_diag is None:
         return 1.0
-    normed = torch.nn.functional.normalize(vectors, dim=-1, eps=1e-12)
-    cosine = torch.matmul(normed, normed.transpose(-1, -2))
-    mask = ~torch.eye(cosine.shape[-1], device=cosine.device, dtype=torch.bool)
-    off_diag = cosine.masked_select(mask.unsqueeze(0)).reshape(cosine.shape[0], -1)
     return _safe_scalar(off_diag.mean())
+
+
+def _pairwise_positive_cosine_mean(vectors):
+    off_diag = pairwise_cosine_off_diag(vectors)
+    if off_diag is None:
+        return 0.0
+    return _safe_scalar(off_diag.clamp_min(0).mean())
 
 
 def _effective_dimension_95(vectors):
@@ -607,10 +615,29 @@ def _collect_structure_metrics(metrics, debug, data, level, hist_max_points):
     threshold_vectors = selected_thresholds.reshape(selected_thresholds.shape[0], selected_thresholds.shape[1], -1)
     leaf_vectors = leaf_classes.reshape(leaf_classes.shape[0], leaf_classes.shape[1], -1)
     tree_vectors = torch.cat([split_vectors, threshold_vectors, leaf_vectors], dim=-1)
+    combined_decoder_vectors = flatten_grande_estimator_outputs(
+        split_values=split_values,
+        split_index_logits=split_index_logits,
+        estimator_weights=debug["estimator_weights"].detach().float(),
+        leaf_classes=leaf_classes,
+    )
     metrics["grande_diagnostics/diversity/split_index_cosine_mean"] = _pairwise_cosine_mean(split_vectors)
     metrics["grande_diagnostics/diversity/threshold_cosine_mean"] = _pairwise_cosine_mean(threshold_vectors)
     metrics["grande_diagnostics/diversity/leaf_cosine_mean"] = _pairwise_cosine_mean(leaf_vectors)
     metrics["grande_diagnostics/diversity/effective_dim_95"] = _effective_dimension_95(tree_vectors)
+    metrics[
+        "grande_diagnostics/diversity/combined_decoder_output_cosine_mean"
+    ] = _pairwise_cosine_mean(combined_decoder_vectors)
+    metrics[
+        "grande_diagnostics/diversity/combined_decoder_output_positive_cosine_mean"
+    ] = _pairwise_positive_cosine_mean(combined_decoder_vectors)
+    combined_effective_dim = _effective_dimension_95(combined_decoder_vectors)
+    metrics[
+        "grande_diagnostics/diversity/combined_decoder_output_effective_dim_95"
+    ] = combined_effective_dim
+    metrics[
+        "grande_diagnostics/diversity/combined_decoder_output_effective_dim_fraction"
+    ] = combined_effective_dim / max(combined_decoder_vectors.shape[1], 1)
 
     # Estimator weighting and routing.
     estimator_entropy = _entropy(estimator_weights_softmax, dim=-1)

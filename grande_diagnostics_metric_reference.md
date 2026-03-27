@@ -112,9 +112,14 @@ Interpretation:
 | `grande_diagnostics/diversity/threshold_cosine_mean` | Mean pairwise cosine similarity of selected-threshold vectors. | Higher means estimators place splits more similarly. |
 | `grande_diagnostics/diversity/leaf_cosine_mean` | Mean pairwise cosine similarity of leaf output tensors. | Higher means estimator predictions are more similar. |
 | `grande_diagnostics/diversity/effective_dim_95` | Number of singular directions needed to explain 95% of tree-vector variance. | Lower means the ensemble lives in a smaller subspace and is less diverse. |
+| `grande_diagnostics/diversity/combined_decoder_output_cosine_mean` | Mean pairwise cosine similarity after concatenating each estimator's raw decoder outputs (`split_values`, `split_index_logits`, `estimator_weights`, `leaf_classes`). | Higher means the decoder is emitting more redundant full-tree parameter vectors. |
+| `grande_diagnostics/diversity/combined_decoder_output_positive_cosine_mean` | Mean pairwise cosine similarity after clamping negatives to zero. | This is the direct training penalty target for the opt-in diversity loss; lower is better. |
+| `grande_diagnostics/diversity/combined_decoder_output_effective_dim_95` | Number of singular directions needed to explain 95% of combined decoder-output variance. | Lower means the raw decoder outputs live in a smaller estimator subspace. |
+| `grande_diagnostics/diversity/combined_decoder_output_effective_dim_fraction` | `combined_decoder_output_effective_dim_95 / n_estimators`. | Lower means stronger low-rank collapse in the full decoder output. |
 
 Interpretation:
 - High cosine similarity and low `effective_dim_95` mean the ensemble is collapsing toward redundant trees.
+- `combined_decoder_output_*` is the closest diagnostic match to the opt-in diversity regularizer, so it should move first if the regularizer is working as intended.
 
 ## Estimator Weights
 

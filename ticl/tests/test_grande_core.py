@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from ticl.models.decoders import GrandeDecoder
@@ -7,7 +8,9 @@ from ticl.models.grande_core import (
     build_grande_context,
     build_grande_feature_stats,
     build_tree_index_tensors,
+    flatten_grande_estimator_outputs,
     grande_forward,
+    pairwise_cosine_off_diag,
 )
 from ticl.prediction.mothernet import extract_grande_model, predict_with_grande_model
 
@@ -115,6 +118,32 @@ def test_grande_forward_routes_samples_to_expected_leaf():
 
     assert logits.shape == (2, 1, 2)
     assert logits.squeeze(1).argmax(dim=1).tolist() == [0, 1]
+
+
+def test_grande_combined_output_vectors_capture_estimator_similarity():
+    identical_vectors = flatten_grande_estimator_outputs(
+        split_values=torch.tensor([[[[1.0]], [[1.0]]]]),
+        split_index_logits=torch.tensor([[[[0.0]], [[0.0]]]]),
+        estimator_weights=torch.tensor([[[2.0, 3.0], [2.0, 3.0]]]),
+        leaf_classes=torch.tensor([[[[4.0]], [[4.0]]]]),
+    )
+    identical_off_diag = pairwise_cosine_off_diag(identical_vectors)
+    assert identical_off_diag is not None
+    assert torch.allclose(identical_off_diag, torch.ones_like(identical_off_diag))
+
+    diverse_vectors = flatten_grande_estimator_outputs(
+        split_values=torch.tensor([[[[1.0]], [[0.0]]]]),
+        split_index_logits=torch.tensor([[[[0.0]], [[1.0]]]]),
+        estimator_weights=torch.tensor([[[0.0, 0.0], [0.0, 0.0]]]),
+        leaf_classes=torch.tensor([[[[0.0]], [[0.0]]]]),
+    )
+    diverse_off_diag = pairwise_cosine_off_diag(diverse_vectors)
+    assert diverse_off_diag is not None
+    assert torch.allclose(
+        diverse_off_diag,
+        torch.zeros_like(diverse_off_diag),
+        atol=1e-6,
+    )
 
 
 @torch.no_grad()
@@ -258,6 +287,69 @@ def test_factorized_grande_decoder_default_init_emits_non_zero_outputs():
             seed=0,
         )
         assert any(output.abs().sum().item() > 0 for output in outputs)
+
+
+def test_grande_diversity_loss_requires_factorized_variant():
+    with pytest.raises(
+        ValueError,
+        match="grande_diversity_loss_weight requires grande_decoder_variant='factorized_stats'",
+    ):
+        MotherNet(
+            n_out=3,
+            emsize=16,
+            nhead=4,
+            nhid_factor=2,
+            nlayers=1,
+            n_features=10,
+            child_model="grande",
+            decoder_type="average",
+            decoder_hidden_layers=1,
+            decoder_hidden_size=32,
+            y_encoder_layer=None,
+            tabpfn_zero_weights=False,
+            tree_depth=2,
+            n_estimators=3,
+            selected_variables=4,
+            grande_decoder_variant="depthwise_factorized_stats",
+            grande_diversity_loss_weight=0.1,
+        )
+
+
+def test_grande_forward_return_aux_reports_diversity_loss():
+    model = MotherNet(
+        n_out=3,
+        emsize=16,
+        nhead=4,
+        nhid_factor=2,
+        nlayers=1,
+        n_features=5,
+        child_model="grande",
+        decoder_type="class_average",
+        decoder_hidden_layers=1,
+        decoder_hidden_size=32,
+        y_encoder_layer=None,
+        tabpfn_zero_weights=False,
+        tree_depth=2,
+        n_estimators=3,
+        selected_variables=4,
+        grande_decoder_variant="factorized_stats",
+        grande_diversity_loss_weight=0.25,
+    )
+    x = torch.randn(6, 2, 5)
+    y = torch.randint(0, 3, (6, 2))
+
+    output_only = model(({"num_features_used": 5}, x, y), single_eval_pos=4)
+    output_with_aux, aux_losses = model(
+        ({"num_features_used": 5}, x, y),
+        single_eval_pos=4,
+        return_aux=True,
+    )
+
+    assert output_only.shape == output_with_aux.shape
+    assert "grande_diversity_loss" in aux_losses
+    assert "grande_diversity_cosine_mean" in aux_losses
+    assert "grande_diversity_positive_cosine_mean" in aux_losses
+    assert aux_losses["grande_diversity_loss"].item() >= 0.0
 
 
 @torch.no_grad()
