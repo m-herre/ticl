@@ -692,6 +692,52 @@ def _collect_gradient_metrics(metrics, debug, hist_level, hist_max_points):
             debug.get(tensor_name),
         )
 
+    estimator_grad_vectors = {}
+    for tensor_name in (
+        "split_values",
+        "split_index_logits",
+        "estimator_weights",
+        "leaf_classes",
+    ):
+        tensor = debug.get(tensor_name)
+        if tensor is None or tensor.grad is None:
+            continue
+        grad_vectors = tensor.grad.detach().float().reshape(
+            tensor.shape[0], tensor.shape[1], -1
+        )
+        estimator_grad_vectors[tensor_name] = grad_vectors
+        metrics[
+            f"grande_diagnostics/gradients/per_estimator/{tensor_name}_cosine_mean"
+        ] = _pairwise_cosine_mean(grad_vectors)
+        effective_dim = _effective_dimension_95(grad_vectors)
+        metrics[
+            f"grande_diagnostics/gradients/per_estimator/{tensor_name}_effective_dim_95"
+        ] = effective_dim
+        metrics[
+            f"grande_diagnostics/gradients/per_estimator/{tensor_name}_effective_dim_fraction"
+        ] = effective_dim / max(grad_vectors.shape[1], 1)
+
+    if estimator_grad_vectors:
+        combined_tree_output_grad = torch.cat(
+            [
+                estimator_grad_vectors["split_index_logits"],
+                estimator_grad_vectors["split_values"],
+                estimator_grad_vectors["estimator_weights"],
+                estimator_grad_vectors["leaf_classes"],
+            ],
+            dim=-1,
+        )
+        metrics[
+            "grande_diagnostics/gradients/per_estimator/combined_tree_output_cosine_mean"
+        ] = _pairwise_cosine_mean(combined_tree_output_grad)
+        combined_effective_dim = _effective_dimension_95(combined_tree_output_grad)
+        metrics[
+            "grande_diagnostics/gradients/per_estimator/combined_tree_output_effective_dim_95"
+        ] = combined_effective_dim
+        metrics[
+            "grande_diagnostics/gradients/per_estimator/combined_tree_output_effective_dim_fraction"
+        ] = combined_effective_dim / max(combined_tree_output_grad.shape[1], 1)
+
     split_values_grad = debug["split_values"].grad
     split_index_grad = debug["split_index_logits"].grad
     if split_values_grad is not None and split_index_grad is not None:
@@ -702,6 +748,24 @@ def _collect_gradient_metrics(metrics, debug, hist_level, hist_max_points):
             metrics[
                 f"grande_diagnostics/gradients/per_depth/split_index_logits_depth_{depth}_l2_norm"
             ] = float(split_index_grad[:, :, node_idx, :].detach().float().norm().item())
+            metrics[
+                f"grande_diagnostics/gradients/per_depth/split_values_depth_{depth}_cosine_mean"
+            ] = _pairwise_cosine_mean(
+                split_values_grad[:, :, node_idx, :].detach().float().reshape(
+                    split_values_grad.shape[0],
+                    split_values_grad.shape[1],
+                    -1,
+                )
+            )
+            metrics[
+                f"grande_diagnostics/gradients/per_depth/split_index_logits_depth_{depth}_cosine_mean"
+            ] = _pairwise_cosine_mean(
+                split_index_grad[:, :, node_idx, :].detach().float().reshape(
+                    split_index_grad.shape[0],
+                    split_index_grad.shape[1],
+                    -1,
+                )
+            )
 
     _append_histogram(
         metrics,

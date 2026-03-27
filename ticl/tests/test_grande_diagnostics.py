@@ -147,6 +147,10 @@ def test_run_grande_diagnostics_forward_only_skips_gradient_metrics():
     assert "grande_diagnostics/diversity/effective_dim_95" in metrics
     assert "grande_diagnostics/gradients/params/backbone/l2_norm" not in metrics
     assert "grande_diagnostics/gradients/activations/transformer_output/l2_norm" not in metrics
+    assert (
+        "grande_diagnostics/gradients/per_estimator/split_index_logits_cosine_mean"
+        not in metrics
+    )
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
@@ -175,6 +179,18 @@ def test_run_grande_diagnostics_collects_backbone_and_grande_gradients():
     assert metrics["grande_diagnostics/gradients/params/decoder/l2_norm"] > 0
     assert metrics["grande_diagnostics/gradients/activations/transformer_output/l2_norm"] > 0
     assert metrics["grande_diagnostics/gradients/activations/split_index_logits/l2_norm"] > 0
+    assert (
+        "grande_diagnostics/gradients/per_estimator/split_index_logits_cosine_mean"
+        in metrics
+    )
+    assert (
+        "grande_diagnostics/gradients/per_estimator/combined_tree_output_cosine_mean"
+        in metrics
+    )
+    assert (
+        "grande_diagnostics/gradients/per_depth/split_values_depth_0_cosine_mean"
+        in metrics
+    )
     assert "grande_diagnostics/thresholds/depth_0/zscore_abs_mean" in metrics
     assert "grande_diagnostics/diversity/effective_dim_95" in metrics
     assert all(

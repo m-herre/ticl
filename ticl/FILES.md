@@ -8,6 +8,7 @@
 - `distributions.py` — Hyperparameter sampling distributions (beta, gamma, uniform, meta-choices, etc.).
 - `environment.py` — Weights & Biases project/entity configuration constants.
 - `fit_model.py` — CLI entry point: parses args, sets up logging, and launches training.
+- `grande_diagnostics.py` — Snapshot capture and per-epoch GRANDE diagnostics logging, including scalar, histogram, and optional gradient metrics.
 - `model_builder.py` — Model construction, checkpoint loading, loss selection, and training dispatch.
 - `model_configs.py` — Default config dicts for each model type (MotherNet, TabPFN, additive, etc.).
 - `model_eval.py` — Script to evaluate models on OpenML benchmark datasets.

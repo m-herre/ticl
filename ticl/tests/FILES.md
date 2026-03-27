@@ -6,6 +6,7 @@
 - `test_fit_model_parsing.py` — Tests that `fit_model.main(['--help'])` exits cleanly with code 0.
 - `test_follow_sklearn_interface.py` — Tests sklearn-compatible fit/predict/score/pickle for TabPFN, MotherNet, GAMformer (classification and regression), BAAM, and DistilledTabPFNMLP.
 - `test_get_gradients.py` — Tests that TabPFN supports gradient-based optimization of input data by verifying monotone loss decrease over gradient steps.
+- `test_grande_diagnostics.py` — Tests deterministic GRANDE diagnostic snapshotting plus forward-only and gradient-enabled diagnostics collection during training.
 - `test_grande_core.py` — Tests GRANDE core components: context building, tree routing, decoder output shapes, factorized decoder properties, temperature annealing, feature statistics, and extract-then-predict round-trip.
 - `test_learning_rate_schedulers.py` — Tests cosine, exponential, and constant LR schedules respect min_lr bounds, and validates LR decay during short training runs.
 - `test_load_module_only_inference.py` — Tests that TabPFN loaded in inference-only mode produces identical predictions to a normally loaded model on OpenML data.

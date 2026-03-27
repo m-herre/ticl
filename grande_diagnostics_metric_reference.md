@@ -220,6 +220,29 @@ Interpretation:
 | --- | --- | --- |
 | `grande_diagnostics/gradients/per_depth/split_values_depth_{d}_l2_norm` | Gradient norm on split values at depth `d`. | Low deep-layer values suggest weak threshold learning deeper in the tree. |
 | `grande_diagnostics/gradients/per_depth/split_index_logits_depth_{d}_l2_norm` | Gradient norm on split-index logits at depth `d`. | Low deep-layer values suggest weak feature-selection learning deeper in the tree. |
+| `grande_diagnostics/gradients/per_depth/split_values_depth_{d}_cosine_mean` | Mean pairwise cosine similarity of per-estimator split-value gradients at depth `d`. | Higher means estimators are receiving more similar threshold-learning signal at that depth. |
+| `grande_diagnostics/gradients/per_depth/split_index_logits_depth_{d}_cosine_mean` | Mean pairwise cosine similarity of per-estimator split-index-logit gradients at depth `d`. | Higher means estimators are receiving more similar feature-selection signal at that depth. |
+
+### Per-estimator gradient similarity
+
+These summarize whether different estimators are being pushed in similar directions during the diagnostic backward pass.
+
+| Metric | Meaning | How to read it |
+| --- | --- | --- |
+| `grande_diagnostics/gradients/per_estimator/split_index_logits_cosine_mean` | Mean pairwise cosine similarity of per-estimator split-index-logit gradients. | Higher means more shared feature-selection supervision across estimators. |
+| `grande_diagnostics/gradients/per_estimator/split_values_cosine_mean` | Mean pairwise cosine similarity of per-estimator split-value gradients. | Higher means more shared threshold-learning supervision across estimators. |
+| `grande_diagnostics/gradients/per_estimator/estimator_weights_cosine_mean` | Mean pairwise cosine similarity of per-estimator estimator-weight gradients. | Higher means estimator weighting is being updated more uniformly across trees. |
+| `grande_diagnostics/gradients/per_estimator/leaf_classes_cosine_mean` | Mean pairwise cosine similarity of per-estimator leaf-output gradients. | Higher means leaves are receiving more homogeneous prediction signal. |
+| `grande_diagnostics/gradients/per_estimator/combined_tree_output_cosine_mean` | Mean pairwise cosine similarity after concatenating all decoder-output gradients per estimator. | Highest-level check for whether the whole tree output is receiving near-copy supervision. |
+| `grande_diagnostics/gradients/per_estimator/{name}_effective_dim_95` | Effective estimator-dimension needed to explain 95% of gradient variance for gradient group `{name}`. | Lower means gradient supervision lives in a smaller estimator subspace. |
+| `grande_diagnostics/gradients/per_estimator/{name}_effective_dim_fraction` | `effective_dim_95 / n_estimators` for gradient group `{name}`. | Lower means stronger low-rank or shared-gradient structure. |
+
+Here `{name}` is one of:
+- `split_index_logits`
+- `split_values`
+- `estimator_weights`
+- `leaf_classes`
+- `combined_tree_output`
 
 ## Practical Reading Guide
 
@@ -240,6 +263,8 @@ If you are debugging optimization or depth-wise learning failure, add:
 - `gradients/params/decoder/*`
 - `gradients/per_depth/split_values_depth_{d}_l2_norm`
 - `gradients/per_depth/split_index_logits_depth_{d}_l2_norm`
+- `gradients/per_estimator/*_cosine_mean`
+- `gradients/per_estimator/*_effective_dim_fraction`
 
 ## Existing Related Files
 
