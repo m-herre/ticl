@@ -17,6 +17,8 @@
 - `setup.py` — Minimal setuptools entry point
 - `submit_grande_depthwise_diagnostics.sh` — SLURM submit script for GRANDE MotherNet depthwise runs with W&B and per-epoch GRANDE diagnostics enabled
 - `submit_grande_factorized_diagnostics.sh` — SLURM submit script for GRANDE MotherNet factorized runs with W&B and per-epoch GRANDE diagnostics enabled
+- `submit_grande_hpo.sh` — SLURM batch script for GRANDE HPO: reads a chunk JSON and runs trials sequentially
+- `launch_grande_hpo.sh` — Launcher script: samples configs via grande_hpo.py, submits 10 SLURM jobs
 - `tabflex_conda.yaml` — Conda environment spec for TabFlex (PyTorch 2.0, CUDA 11.8)
 - `tabflex_conda_update.yaml` — Updated TabFlex conda environment with pinned versions
 
