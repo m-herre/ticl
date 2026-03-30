@@ -393,6 +393,13 @@ def get_model_string(config, num_gpus, device, parser):
     model_string = (f"{model_type_string}{config_string}{gpu_string}"
                     f"{'_continue' if config['orchestration']['continue_run'] else '_warm' if config['orchestration']['warm_start_from'] else ''}")
     model_string = model_string + '_'+datetime.datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+    # Truncate to stay under filesystem 255-byte filename limit
+    # (longest suffix is "_epoch_on_exit.cpkt" = 19 chars, so cap at 220)
+    max_fs_length = 220
+    if len(model_string) > max_fs_length:
+        digest = hashlib.sha1(model_string.encode("utf-8")).hexdigest()[:12]
+        prefix_len = max_fs_length - len(digest) - 1
+        model_string = f"{model_string[:prefix_len]}_{digest}"
     if config['orchestration']['st_checkpoint_dir'] is not None:
         with open(f"{config['orchestration']['st_checkpoint_dir']}/model_string.txt", 'w') as f:
             f.write(model_string)
