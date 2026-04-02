@@ -146,6 +146,17 @@ def test_grande_combined_output_vectors_capture_estimator_similarity():
     )
 
 
+def test_flatten_grande_estimator_outputs_casts_all_parts_to_float32():
+    combined = flatten_grande_estimator_outputs(
+        split_values=torch.randn(2, 3, 4, 1, dtype=torch.float32),
+        split_index_logits=torch.randn(2, 3, 4, 1, dtype=torch.bfloat16),
+        estimator_weights=torch.randn(2, 3, 2, dtype=torch.float16),
+        leaf_classes=torch.randn(2, 3, 4, 3, dtype=torch.bfloat16),
+    )
+
+    assert combined.dtype == torch.float32
+
+
 @torch.no_grad()
 @torch.inference_mode()
 def test_grande_decoder_outputs_expected_shapes():
@@ -352,6 +363,68 @@ def test_grande_forward_return_aux_reports_diversity_loss():
     assert aux_losses["grande_diversity_loss"].item() >= 0.0
 
 
+def test_grande_compile_uses_torch_compile_dynamic(monkeypatch):
+    compile_calls = {}
+
+    def fake_compile(fn, dynamic):
+        compile_calls["fn"] = fn
+        compile_calls["dynamic"] = dynamic
+        return fn
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+
+    model = MotherNet(
+        n_out=3,
+        emsize=16,
+        nhead=4,
+        nhid_factor=2,
+        nlayers=1,
+        n_features=5,
+        child_model="grande",
+        decoder_type="class_average",
+        decoder_hidden_layers=1,
+        decoder_hidden_size=32,
+        y_encoder_layer=None,
+        tabpfn_zero_weights=False,
+        tree_depth=2,
+        n_estimators=3,
+        selected_variables=4,
+        grande_decoder_variant="factorized_stats",
+        grande_compile=True,
+    )
+
+    assert compile_calls["fn"] is grande_forward
+    assert compile_calls["dynamic"] is True
+    assert model._grande_forward is grande_forward
+
+
+def test_grande_compile_falls_back_when_torch_compile_is_unavailable(monkeypatch):
+    monkeypatch.delattr(torch, "compile", raising=False)
+
+    with pytest.warns(RuntimeWarning, match="torch.compile is unavailable"):
+        model = MotherNet(
+            n_out=3,
+            emsize=16,
+            nhead=4,
+            nhid_factor=2,
+            nlayers=1,
+            n_features=5,
+            child_model="grande",
+            decoder_type="class_average",
+            decoder_hidden_layers=1,
+            decoder_hidden_size=32,
+            y_encoder_layer=None,
+            tabpfn_zero_weights=False,
+            tree_depth=2,
+            n_estimators=3,
+            selected_variables=4,
+            grande_decoder_variant="factorized_stats",
+            grande_compile=True,
+        )
+
+    assert model._grande_forward is grande_forward
+
+
 @torch.no_grad()
 @torch.inference_mode()
 def test_depthwise_grande_decoder_tracks_temperature_steps_during_training():
@@ -504,6 +577,7 @@ def test_grande_extract_and_predict_smoke():
             inference_device="cpu",
             scale=True,
         )
+        assert grande_params["path_identifier_list"].dtype == np.float32
         train_mean = np.nan_to_num(np.nanmean(x_train, axis=0), 0.0)
         train_std = np.nanstd(x_train, axis=0, ddof=1) + 0.000001
         train_std[np.isnan(train_std)] = 1.0

@@ -5,6 +5,7 @@ import torch
 
 from ticl.model_builder import get_model, load_model
 from ticl.model_configs import get_model_default_config
+from ticl.models.grande_core import grande_forward
 
 
 def _make_small_grande_config():
@@ -67,3 +68,22 @@ def test_load_model_still_requires_grande_parameters():
         load_model.cache_clear()
         with pytest.raises(RuntimeError, match="decoder.estimator_embedding.weight"):
             load_model(checkpoint_path, device="cpu")
+
+
+def test_load_model_grande_checkpoint_stays_portable_without_torch_compile(monkeypatch):
+    config = _make_small_grande_config()
+    config["mothernet"]["grande_compile"] = True
+    load_model.cache_clear()
+    _, model, *_ = get_model(config, device="cpu", should_train=False)
+    model_state = model.state_dict()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_path = f"{tmpdir}/compiled_grande.cpkt"
+        _save_checkpoint(checkpoint_path, model_state, config)
+        load_model.cache_clear()
+        monkeypatch.delattr(torch, "compile", raising=False)
+        with pytest.warns(RuntimeWarning, match="torch.compile is unavailable"):
+            loaded_model, loaded_config = load_model(checkpoint_path, device="cpu")
+
+    assert loaded_config["mothernet"]["grande_compile"] is True
+    assert loaded_model._grande_forward is grande_forward

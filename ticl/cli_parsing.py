@@ -417,6 +417,11 @@ def argparser_from_config(parser, description="Train Mothernet"):
             help="Number of training forwards over which to anneal GRANDE split-index temperature.",
         )
         mothernet.add_argument(
+            "--grande-compile",
+            type=str2bool,
+            help="Whether to wrap GRANDE's forward kernel in torch.compile(dynamic=True).",
+        )
+        mothernet.add_argument(
             "--grande-profile",
             type=str2bool,
             help="Whether to record per-epoch GRANDE timing breakdowns for context, stats, decoder, and forward.",

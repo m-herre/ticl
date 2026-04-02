@@ -46,6 +46,7 @@ def main(argv, extra_config=None):
         raise ValueError("Specifying create-new-run makes no sense when not continuing run")
     base_path = orchestration.base_path
     torch.set_num_threads(24)
+    torch.set_float32_matmul_precision("high")
     for group_name in vars(args):
         if group_name == "model_type":
             # the only non-group argument from the top level parser

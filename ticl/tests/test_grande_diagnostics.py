@@ -10,6 +10,7 @@ from ticl.grande_diagnostics import (
     run_grande_diagnostics,
 )
 from ticl.models.mothernet import MotherNet
+import ticl.train as train_module
 from ticl.train import train
 
 
@@ -98,6 +99,37 @@ class _SingleBatchLoader:
 
     def get_test_batch(self):
         return _clone_batch(self.batch)
+
+
+def test_resolve_amp_settings_disables_amp_on_cpu():
+    amp_enabled, amp_dtype, scaler = train_module._resolve_amp_settings("cpu:0", True)
+
+    assert amp_enabled is False
+    assert amp_dtype is None
+    assert scaler is None
+
+
+def test_resolve_amp_settings_only_uses_scaler_for_fp16(monkeypatch):
+    scaler = object()
+
+    monkeypatch.setattr(train_module.torch.cuda, "is_bf16_supported", lambda: False)
+    monkeypatch.setattr(train_module, "GradScaler", lambda: scaler)
+    amp_enabled, amp_dtype, resolved_scaler = train_module._resolve_amp_settings(
+        "cuda:0", True
+    )
+
+    assert amp_enabled is True
+    assert amp_dtype == torch.float16
+    assert resolved_scaler is scaler
+
+    monkeypatch.setattr(train_module.torch.cuda, "is_bf16_supported", lambda: True)
+    amp_enabled, amp_dtype, resolved_scaler = train_module._resolve_amp_settings(
+        "cuda:0", True
+    )
+
+    assert amp_enabled is True
+    assert amp_dtype == torch.bfloat16
+    assert resolved_scaler is None
 
 
 def test_prepare_grande_diagnostic_snapshot_is_deterministic_and_restores_rng_state():

@@ -31,10 +31,24 @@ def eval_criterion(criterion, targets, output, device, n_out):
     return utils.torch_nanmean(losses.mean(0), return_nanshare=True)
 
 
+def _resolve_amp_settings(device, train_mixed_precision):
+    device_type = torch.device(device).type
+    amp_enabled = bool(train_mixed_precision and device_type == "cuda")
+    amp_dtype = None
+    scaler = None
+    if amp_enabled:
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        if amp_dtype == torch.float16:
+            scaler = GradScaler()
+    return amp_enabled, amp_dtype, scaler
+
+
 def train_epoch(
     model, 
     aggregate_k_gradients, 
     using_dist, 
+    amp_enabled,
+    amp_dtype,
     scaler, 
     dl, 
     device, 
@@ -73,7 +87,7 @@ def train_epoch(
         else:
             cm = nullcontext()
         with cm:
-            with autocast(dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16) if scaler is not None else nullcontext():
+            with autocast(dtype=amp_dtype) if amp_enabled else nullcontext():
                 # for mothernet, la_mothernet, model is MLPModelPredictor from ticl.py
                 output = model(
                     tuple(e.to(device) if torch.is_tensor(e) else e for e in data)
@@ -101,25 +115,32 @@ def train_epoch(
                     )
                 loss = (task_loss + weighted_aux_loss) / aggregate_k_gradients
 
-            loss.backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             if batch % aggregate_k_gradients == aggregate_k_gradients - 1:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1., foreach=True)
-                optimizer.step()
-                optimizer.zero_grad()                
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
             if torch.isnan(loss):
                 raise ValueError("NAN loss encountered")
             else:
-                total_loss += loss.mean().cpu().detach().item()
-                total_task_loss += task_loss.mean().cpu().detach().item()
+                total_loss += loss.mean().detach()
+                total_task_loss += task_loss.mean().detach()
                 if collect_aux_losses and "grande_diversity_loss" in aux_losses:
-                    total_grande_diversity_loss += (
-                        aux_losses["grande_diversity_loss"].detach().cpu().item()
-                    )
-                    total_grande_diversity_loss_weighted += (
-                        weighted_aux_loss.detach().cpu().item()
-                    )
+                    total_grande_diversity_loss += aux_losses[
+                        "grande_diversity_loss"
+                    ].detach()
+                    total_grande_diversity_loss_weighted += weighted_aux_loss.detach()
             nan_steps += nan_share
             ignore_steps += (targets == -100).float().mean()
 
@@ -214,7 +235,9 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
     if reduce_lr_on_spike:
         # In this case we're not properly restarting the scheduler when we load a checkpoint, sad
         spike_scheduler = ReduceLROnSpike(optimizer, smoothing=10, factor=0.5, min_lr=min_lr, tolerance=spike_tolerance, verbose=True)
-    scaler = GradScaler() if train_mixed_precision and device != "cpu" else None
+    amp_enabled, amp_dtype, scaler = _resolve_amp_settings(
+        device, train_mixed_precision
+    )
 
     # check that everything uses up-to-date APIs
     utils.check_compatibility(dl)
@@ -278,6 +301,8 @@ def train(dl, model, criterion, optimizer_state=None, scheduler=None,
                 model, 
                 aggregate_k_gradients, 
                 using_dist, 
+                amp_enabled,
+                amp_dtype,
                 scaler, 
                 dl, 
                 device, 

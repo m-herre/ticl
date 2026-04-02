@@ -237,6 +237,7 @@ def get_mothernet_config():
             "grande_split_temperature_start": 1.0,
             "grande_split_temperature_end": 1.0,
             "grande_split_temperature_anneal_steps": 0,
+            "grande_compile": False,
             "grande_profile": False,
             "grande_diagnostics": False,
             "grande_diagnostics_gradients": False,

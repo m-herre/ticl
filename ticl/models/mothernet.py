@@ -1,4 +1,5 @@
 import time
+import warnings
 
 import torch, wandb
 import torch.nn as nn
@@ -335,7 +336,7 @@ class ModelPredictor(nn.Module):
             else:
                 split_values, split_index_logits, estimator_weights, leaf_classes = decoder_out
             forward_start = self._start_grande_timer(x.device)
-            grande_out = grande_forward(
+            grande_out = self._grande_forward(
                 x=x[single_eval_pos:],
                 split_values=split_values,
                 split_index_logits=split_index_logits,
@@ -343,7 +344,7 @@ class ModelPredictor(nn.Module):
                 leaf_classes=leaf_classes,
                 features_by_estimator=context["features_by_estimator"],
                 feature_mask=context["feature_mask"],
-                path_identifier_list=self.decoder.path_identifier_list,
+                path_identifier_list=self.decoder.path_identifier_list_float,
                 internal_node_index_list=self.decoder.internal_node_index_list,
                 training=self.training,
                 dropout=self.decoder.grande_dropout,
@@ -460,6 +461,7 @@ class MotherNet(ModelPredictor):
         grande_split_temperature_start=1.0,
         grande_split_temperature_end=1.0,
         grande_split_temperature_anneal_steps=0,
+        grande_compile=False,
         grande_profile=False,
         grande_diagnostics=False,
         grande_diagnostics_gradients=False,
@@ -479,6 +481,7 @@ class MotherNet(ModelPredictor):
         self.grande_diagnostics_seed = grande_diagnostics_seed
         self.grande_diagnostics_hist_max_points = grande_diagnostics_hist_max_points
         self.grande_diversity_loss_weight = float(grande_diversity_loss_weight)
+        self._grande_forward = grande_forward
         self.reset_grande_profile()
         if self.grande_diversity_loss_weight < 0.0:
             raise ValueError("grande_diversity_loss_weight must be non-negative")
@@ -586,6 +589,22 @@ class MotherNet(ModelPredictor):
                 grande_split_temperature_end=grande_split_temperature_end,
                 grande_split_temperature_anneal_steps=grande_split_temperature_anneal_steps,
             )
+            if grande_compile:
+                if not hasattr(torch, "compile"):
+                    warnings.warn(
+                        "grande_compile was requested, but torch.compile is unavailable; "
+                        "falling back to eager GRANDE forward.",
+                        RuntimeWarning,
+                    )
+                else:
+                    try:
+                        self._grande_forward = torch.compile(grande_forward, dynamic=True)
+                    except Exception as exc:
+                        warnings.warn(
+                            "grande_compile was requested, but torch.compile setup failed; "
+                            f"falling back to eager GRANDE forward. Original error: {exc}",
+                            RuntimeWarning,
+                        )
         else:
             raise ValueError(f"Unknown child_model type: {self.child_model}")
 

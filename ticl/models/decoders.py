@@ -905,6 +905,11 @@ class GrandeDecoder(nn.Module):
         path_identifier_list, internal_node_index_list = build_tree_index_tensors(tree_depth)
         self.register_buffer("path_identifier_list", path_identifier_list, persistent=True)
         self.register_buffer(
+            "path_identifier_list_float",
+            path_identifier_list.float(),
+            persistent=False,
+        )
+        self.register_buffer(
             "internal_node_index_list", internal_node_index_list, persistent=True
         )
 
@@ -931,25 +936,29 @@ class GrandeDecoder(nn.Module):
         if use_training_schedule is None:
             use_training_schedule = self.training
         if not use_training_schedule:
-            temperature = self.grande_split_temperature_end
+            temperature = self.split_temperature_step.float().new_tensor(
+                self.grande_split_temperature_end
+            )
         elif (
             self.grande_split_temperature_anneal_steps <= 0
             or self.grande_split_temperature_start
             == self.grande_split_temperature_end
         ):
-            temperature = self.grande_split_temperature_end
+            temperature = self.split_temperature_step.float().new_tensor(
+                self.grande_split_temperature_end
+            )
         else:
-            progress = min(
-                float(self.split_temperature_step.item())
+            progress = torch.clamp(
+                self.split_temperature_step.float()
                 / float(self.grande_split_temperature_anneal_steps),
-                1.0,
+                max=1.0,
             )
             temperature = self.grande_split_temperature_start + progress * (
                 self.grande_split_temperature_end - self.grande_split_temperature_start
             )
             if advance:
                 self.split_temperature_step.add_(1)
-        return torch.tensor(temperature, device=device, dtype=torch.float32)
+        return temperature.to(device=device, dtype=torch.float32)
 
     def peek_split_temperature(self, *, device, use_training_schedule=None):
         return self._current_split_temperature(

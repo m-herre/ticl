@@ -129,10 +129,18 @@ def build_grande_context(
     if take <= 0:
         raise ValueError("num_features_used must be positive")
     features_by_estimator = torch.zeros(
-        batch_size, n_estimators, selected_variables, dtype=torch.long
+        batch_size,
+        n_estimators,
+        selected_variables,
+        device=device,
+        dtype=torch.long,
     )
     feature_mask = torch.zeros(
-        batch_size, n_estimators, selected_variables, dtype=torch.bool
+        batch_size,
+        n_estimators,
+        selected_variables,
+        device=device,
+        dtype=torch.bool,
     )
     sampled_features = _sample_without_replacement(
         (batch_size, n_estimators),
@@ -145,8 +153,8 @@ def build_grande_context(
     feature_mask[..., :take] = True
 
     return {
-        "features_by_estimator": features_by_estimator.to(device),
-        "feature_mask": feature_mask.to(device),
+        "features_by_estimator": features_by_estimator,
+        "feature_mask": feature_mask,
         "num_features_used": int(num_features_used),
     }
 
@@ -341,7 +349,7 @@ def grande_forward(
         left = torch.where(masked_ext, smaller_prob_ext, left)
         right = torch.where(masked_ext, 1.0 - smaller_prob_ext, right)
 
-    path_ids = path_identifier_list.to(dtype=dtype)
+    path_ids = path_identifier_list
     path_probs = torch.prod(
         ((1.0 - path_ids) * left + path_ids * right),
         dim=-1,

@@ -373,7 +373,7 @@ def extract_grande_model(
         "leaf_classes": detach(leaf_classes.squeeze(0)),
         "features_by_estimator": detach(context["features_by_estimator"].squeeze(0)),
         "feature_mask": detach(context["feature_mask"].squeeze(0)),
-        "path_identifier_list": detach(model.decoder.path_identifier_list),
+        "path_identifier_list": detach(model.decoder.path_identifier_list_float),
         "internal_node_index_list": detach(model.decoder.internal_node_index_list),
         "missing_values": model.decoder.missing_values,
         "feature_rescale": max_features / X_train.shape[1],
@@ -689,7 +689,7 @@ def predict_with_grande_model(
             grande_params["feature_mask"], device=device, dtype=torch.bool
         ).unsqueeze(0),
         path_identifier_list=torch.as_tensor(
-            grande_params["path_identifier_list"], device=device, dtype=torch.long
+            grande_params["path_identifier_list"], device=device, dtype=torch.float32
         ),
         internal_node_index_list=torch.as_tensor(
             grande_params["internal_node_index_list"], device=device, dtype=torch.long
