@@ -118,24 +118,80 @@ salloc --partition=gpu-vram-94gb --gres=gpu:1 --cpus-per-task=12 --mem=50G
 python ticl/fit_model.py mothernet --child-model grande ...
 ```
 
-## Key GRANDE CLI Args (ticl/cli_parsing.py)
+## GPU Usage and H100 Tuning
 
-| Arg | Default | Description |
-|-----|---------|-------------|
-| `--child-model` | `mlp` | `grande` for GRANDE path |
-| `--tree-depth` | `5` | Depth of each tree |
-| `--n-estimators` | `1` | Number of trees in ensemble |
-| `--selected-variables` | `16` | Feature budget per estimator (fraction or absolute) |
-| `--data-subset-fraction` | `1.0` | Estimator-local data sampling ratio |
-| `--bootstrap` | `False` | Bootstrap vs without-replacement sampling |
-| `--grande-dropout` | `0.0` | Dropout on estimator weights |
-| `--missing-values` | `True` | NaN-aware routing |
-| `--grande-decoder-variant` | `baseline` | `baseline` / `factorized_stats` / `depthwise_factorized_stats` |
-| `--grande-output-init` | `default` | `zero` or `default` |
-| `--grande-split-temperature-start` | `1.0` | Split logit temperature at start |
-| `--grande-split-temperature-end` | `1.0` | Split logit temperature at end |
-| `--grande-split-temperature-anneal-steps` | `0` | Steps to anneal temperature |
-| `--grande-profile` | `False` | Log per-epoch timing breakdown |
+### What works by default
+
+- Single-GPU CUDA training is the default path. If `--use-cpu` is not set, training uses CUDA automatically.
+- Mixed precision is enabled by default. On H100, that means bf16 autocast by default.
+- `torch.set_float32_matmul_precision("high")` is enabled at startup, so TF32 matmuls are already on.
+- Flash SDP is left enabled on SM90 GPUs such as H100.
+
+### What is not optimized by default
+
+- The default physical batch size is conservative (`--batch-size 8`).
+- Attention recomputation is enabled by default (`--recompute-attn True`), which saves memory but reduces throughput.
+- `--grande-compile` is off by default.
+- Do not assume all visible GPUs will be used automatically. The normal local multi-GPU launch path is not a supported default workflow; prefer single-GPU runs unless you are explicitly working on distributed training.
+
+### H100 Throughput Preset
+
+Use this when you want maximum single-run throughput on a single H100:
+
+```bash
+python ticl/fit_model.py mothernet \
+    -g 0 \
+    -b 64 \
+    -k 1 \
+    -t true \
+    --recompute-attn false \
+    --adaptive-batch-size false \
+    --progress-bar false \
+    --save-every 100
+```
+
+For GRANDE runs, add:
+
+```bash
+    --child-model grande \
+    --grande-compile true
+```
+
+Tuning guidance:
+
+- First increase `--batch-size` until you are close to memory limit.
+- Keep `--aggregate_k_gradients 1` while tuning for raw throughput. Gradient accumulation increases effective batch size, but it does not improve GPU utilization the way a larger physical batch does.
+- Only keep `--recompute-attn true` if you need it to fit memory.
+- `--grande-compile true` is most useful for longer GRANDE runs where compile overhead can amortize.
+
+### Fast Prototyping Preset
+
+Use this when iteration speed matters more than maximizing tokens/sec over a long run:
+
+```bash
+python ticl/fit_model.py mothernet \
+    -g 0 \
+    -b 32 \
+    -k 1 \
+    -t true \
+    --recompute-attn false \
+    --adaptive-batch-size false \
+    --num-steps 512 \
+    -E 20 \
+    --save-every 100 \
+    --validate false \
+    --progress-bar false
+```
+
+For very short smoke tests, leave `--grande-compile` off. For medium or long GRANDE experiments, turn it on.
+
+### Benchmarking Guidance
+
+- For apples-to-apples benchmarking, set `--seed-everything true`.
+- Disable diagnostics and profiling unless they are the subject of the experiment.
+- Keep `--grande-profile false` and `--grande-diagnostics false` for throughput-focused runs.
+- `--detect-anomaly` should remain off except for debugging.
+- Logging is useful, but W&B / MLflow / validation all add overhead. For pure throughput measurement, keep the run minimal.
 
 ## Tensor Conventions
 
@@ -163,6 +219,9 @@ Full MotherNet training is slow: ~4 min/epoch at `--num-steps 2048`, ~12 min/epo
 
 ## Performance Notes
 
+- On H100, the main practical speed levers are larger physical batch size and disabling attention recomputation when memory allows.
+- Mixed precision, TF32 matmuls, and flash SDP are already enabled by default on H100-capable runs.
+- Use `--grande-compile true` for longer GRANDE experiments; skip it for very short prototyping runs.
 - Runtime hot spots are in `ticl/models/grande_core.py`, especially context sampling and estimator-local feature statistics. Keep those paths vectorized; avoid Python loops over `batch_size * n_estimators`.
 - Use `--grande-profile True` to record epoch-level timings: `grande_context_s`, `grande_feature_stats_s`, `grande_decoder_mlp_s`, `grande_forward_s`.
 

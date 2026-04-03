@@ -8,9 +8,12 @@
 - `azure-pipelines.yml` — Azure DevOps CI pipeline: conda setup, pytest, caching
 - `continue_gradtree.sh` — SLURM job script for training/continuing GRANDE MotherNet runs
 - `environment.yml` — Conda environment spec for the main `ticl` environment
+- `grande_baseline_h100.sh` — Ready-to-run SLURM script for a single-H100 GRANDE factorized baseline with throughput-oriented defaults
 - `grande.py` — Standalone GRANDE implementation (reference differentiable tree ensemble)
 - `grande_diagnostics_metric_reference.md` — Reference for all tracked GRANDE diagnostics metrics, including per-prefix explanations and interpretation notes
 - `grande_wandb_diagnostics_plan.md` — Implementation plan for per-epoch W&B diagnostics, initialization logging, and backbone/decoder gradient tracking for GRANDE MotherNet
+- `launch_grande_hpo.sh` — Launcher script: samples configs via grande_hpo.py, submits 10 SLURM jobs
+- `mlp_baseline_h100.sh` — Ready-to-run SLURM script for a single-H100 MotherNet MLP baseline with throughput-oriented defaults
 - `mothernet_grande_decoder_analysis.md` — Analysis of why predicting GRANDE params is harder than MLP params
 - `mothernet_train.sh` — SLURM job script for default MotherNet (MLP child) training
 - `setup.cfg` — Python package config: package discovery and flake8 settings
@@ -18,7 +21,6 @@
 - `submit_grande_depthwise_diagnostics.sh` — SLURM submit script for GRANDE MotherNet depthwise runs with W&B and per-epoch GRANDE diagnostics enabled
 - `submit_grande_factorized_diagnostics.sh` — SLURM submit script for GRANDE MotherNet factorized runs with W&B and per-epoch GRANDE diagnostics enabled
 - `submit_grande_hpo.sh` — SLURM batch script for GRANDE HPO: reads a chunk JSON and runs trials sequentially
-- `launch_grande_hpo.sh` — Launcher script: samples configs via grande_hpo.py, submits 10 SLURM jobs
 - `tabflex_conda.yaml` — Conda environment spec for TabFlex (PyTorch 2.0, CUDA 11.8)
 - `tabflex_conda_update.yaml` — Updated TabFlex conda environment with pinned versions
 

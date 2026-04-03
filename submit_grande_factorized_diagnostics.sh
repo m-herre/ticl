@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=grande_factorized
-#SBATCH --partition=gpu-vram-94gb
+#SBATCH --partition=gpu-vram-32gb
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50G
