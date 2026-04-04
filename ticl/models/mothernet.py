@@ -11,6 +11,7 @@ from ticl.models.decoders import MLPModelDecoder, GradTreeDecoder, GrandeDecoder
 from ticl.models.grande_core import (
     flatten_grande_estimator_outputs,
     grande_forward,
+    grande_forward_compiled,
     pairwise_cosine_off_diag,
 )
 from ticl.models.layer import TransformerEncoderLayer, TransformerEncoderSimple
@@ -598,7 +599,9 @@ class MotherNet(ModelPredictor):
                     )
                 else:
                     try:
-                        self._grande_forward = torch.compile(grande_forward, dynamic=True)
+                        self._grande_forward = torch.compile(
+                            grande_forward_compiled, dynamic=True
+                        )
                     except Exception as exc:
                         warnings.warn(
                             "grande_compile was requested, but torch.compile setup failed; "

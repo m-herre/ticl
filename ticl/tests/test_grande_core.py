@@ -10,6 +10,7 @@ from ticl.models.grande_core import (
     build_tree_index_tensors,
     flatten_grande_estimator_outputs,
     grande_forward,
+    grande_forward_compiled,
     pairwise_cosine_off_diag,
 )
 from ticl.prediction.mothernet import extract_grande_model, predict_with_grande_model
@@ -393,9 +394,9 @@ def test_grande_compile_uses_torch_compile_dynamic(monkeypatch):
         grande_compile=True,
     )
 
-    assert compile_calls["fn"] is grande_forward
+    assert compile_calls["fn"] is grande_forward_compiled
     assert compile_calls["dynamic"] is True
-    assert model._grande_forward is grande_forward
+    assert model._grande_forward is grande_forward_compiled
 
 
 def test_grande_compile_falls_back_when_torch_compile_is_unavailable(monkeypatch):
@@ -423,6 +424,59 @@ def test_grande_compile_falls_back_when_torch_compile_is_unavailable(monkeypatch
         )
 
     assert model._grande_forward is grande_forward
+
+
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
+def test_grande_forward_compile_dynamic_supports_backward():
+    seq_len, batch_size, n_estimators, tree_depth, n_features, n_out = 4, 1, 2, 2, 3, 2
+    n_leaves = 2**tree_depth
+    path_ids, node_idx = build_tree_index_tensors(tree_depth)
+
+    x = torch.randn(seq_len, batch_size, n_features, requires_grad=True)
+    split_values = torch.randn(
+        batch_size, n_estimators, tree_depth, n_features, requires_grad=True
+    )
+    split_index_logits = torch.randn(
+        batch_size, n_estimators, tree_depth, n_features, requires_grad=True
+    )
+    estimator_weights = torch.randn(
+        batch_size, n_estimators, n_leaves, requires_grad=True
+    )
+    leaf_classes = torch.randn(
+        batch_size, n_estimators, n_leaves, n_out, requires_grad=True
+    )
+    features_by_estimator = torch.randint(
+        0, n_features, (batch_size, n_estimators, n_features)
+    )
+    feature_mask = torch.ones(
+        batch_size, n_estimators, n_features, dtype=torch.bool
+    )
+
+    try:
+        compiled = torch.compile(grande_forward_compiled, dynamic=True)
+    except Exception as exc:
+        pytest.skip(f"torch.compile backend unavailable: {exc}")
+    logits = compiled(
+        x=x,
+        split_values=split_values,
+        split_index_logits=split_index_logits,
+        estimator_weights=estimator_weights,
+        leaf_classes=leaf_classes,
+        features_by_estimator=features_by_estimator,
+        feature_mask=feature_mask,
+        path_identifier_list=path_ids.float(),
+        internal_node_index_list=node_idx,
+        training=True,
+        dropout=0.0,
+        missing_values=True,
+        straight_through=True,
+    )
+
+    logits.sum().backward()
+
+    assert logits.shape == (seq_len, batch_size, n_out)
+    assert split_values.grad is not None
+    assert split_index_logits.grad is not None
 
 
 @torch.no_grad()

@@ -14,6 +14,21 @@ def st(hard: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
     return soft - (soft - hard).detach()
 
 
+def _compute_path_probabilities(
+    branch_probs: torch.Tensor, *, compile_workaround: bool
+) -> torch.Tensor:
+    if compile_workaround:
+        # `torch.prod(..., dim=-1)` fails under torch.compile(dynamic=True) on torch 2.1.x
+        # during backward with symbolic sizes. The last element of `cumprod` is
+        # mathematically equivalent and compiles cleanly in the compiled GRANDE path.
+        return torch.cumprod(branch_probs, dim=-1)[..., -1]
+    return torch.prod(branch_probs, dim=-1)
+
+
+def _grande_forward_impl(*, compile_workaround=False, **kwargs):
+    return grande_forward(**kwargs, _compile_workaround=compile_workaround)
+
+
 def resolve_selected_variables(selected_variables, max_features):
     if selected_variables <= 0:
         raise ValueError("selected_variables must be positive")
@@ -315,6 +330,7 @@ def grande_forward(
     missing_values=True,
     straight_through=False,
     return_debug=False,
+    _compile_workaround=False,
 ):
     dtype = x.dtype
     x_local = gather_estimator_features(x, features_by_estimator)
@@ -350,9 +366,9 @@ def grande_forward(
         right = torch.where(masked_ext, 1.0 - smaller_prob_ext, right)
 
     path_ids = path_identifier_list
-    path_probs = torch.prod(
-        ((1.0 - path_ids) * left + path_ids * right),
-        dim=-1,
+    path_probs = _compute_path_probabilities(
+        (1.0 - path_ids) * left + path_ids * right,
+        compile_workaround=_compile_workaround,
     )
 
     estimator_weights_leaf = torch.einsum(
@@ -380,3 +396,7 @@ def grande_forward(
             "estimator_weights_softmax": estimator_weights_softmax,
         }
     return logits
+
+
+def grande_forward_compiled(**kwargs):
+    return _grande_forward_impl(compile_workaround=True, **kwargs)

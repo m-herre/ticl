@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=grande_baseline_h100
-#SBATCH --partition=gpu-vram-32gb
+#SBATCH --partition=gpu-vram-48gb
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
 #SBATCH --mem=80G
@@ -23,11 +23,11 @@ mkdir -p logs runs models_diff
 GPU_ID="${GPU_ID:-0}"
 EPOCHS="${EPOCHS:-50}"
 NUM_STEPS="${NUM_STEPS:-2048}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
-AGGREGATE_K_GRADIENTS="${AGGREGATE_K_GRADIENTS:-1}"
+# BATCH_SIZE="${BATCH_SIZE:-8}"
+# AGGREGATE_K_GRADIENTS="${AGGREGATE_K_GRADIENTS:-1}"
 TRAIN_MIXED_PRECISION="${TRAIN_MIXED_PRECISION:-true}"
 RECOMPUTE_ATTN="${RECOMPUTE_ATTN:-false}"
-ADAPTIVE_BATCH_SIZE="${ADAPTIVE_BATCH_SIZE:-false}"
+# ADAPTIVE_BATCH_SIZE="${ADAPTIVE_BATCH_SIZE:-false}"
 # SAVE_EVERY="${SAVE_EVERY:-100}"
 PROGRESS_BAR="${PROGRESS_BAR:-false}"
 # VALIDATE="${VALIDATE:-false}"
@@ -51,11 +51,11 @@ GRANDE_DIAGNOSTICS_GRADIENTS="${GRANDE_DIAGNOSTICS_GRADIENTS:-true}"
 echo "Launching H100 GRANDE baseline"
 echo "  epochs=${EPOCHS}"
 echo "  num_steps=${NUM_STEPS}"
-echo "  batch_size=${BATCH_SIZE}"
-echo "  aggregate_k_gradients=${AGGREGATE_K_GRADIENTS}"
+# echo "  batch_size=${BATCH_SIZE}"
+# echo "  aggregate_k_gradients=${AGGREGATE_K_GRADIENTS}"
 echo "  train_mixed_precision=${TRAIN_MIXED_PRECISION}"
 echo "  recompute_attn=${RECOMPUTE_ATTN}"
-echo "  adaptive_batch_size=${ADAPTIVE_BATCH_SIZE}"
+# echo "  adaptive_batch_size=${ADAPTIVE_BATCH_SIZE}"
 # echo "  validate=${VALIDATE}"
 echo "  seed_everything=${SEED_EVERYTHING}"
 echo "  tree_depth=${TREE_DEPTH}"
@@ -87,11 +87,11 @@ cmd=(
     --grande-compile "${GRANDE_COMPILE}"
     --epochs "${EPOCHS}"
     --num-steps "${NUM_STEPS}"
-    --batch-size "${BATCH_SIZE}"
-    --aggregate_k_gradients "${AGGREGATE_K_GRADIENTS}"
+    # --batch-size "${BATCH_SIZE}"
+    # --aggregate_k_gradients "${AGGREGATE_K_GRADIENTS}"
     --train-mixed-precision "${TRAIN_MIXED_PRECISION}"
     --recompute-attn "${RECOMPUTE_ATTN}"
-    --adaptive-batch-size "${ADAPTIVE_BATCH_SIZE}"
+    # --adaptive-batch-size "${ADAPTIVE_BATCH_SIZE}"
     # --save-every "${SAVE_EVERY}"
     --progress-bar "${PROGRESS_BAR}"
     # --validate "${VALIDATE}"
