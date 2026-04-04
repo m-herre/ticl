@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=grande_baseline_h100
-#SBATCH --partition=gpu-vram-48gb
+#SBATCH --partition=gpu-vram-32gb
 #SBATCH --cpus-per-task=20
 #SBATCH --gres=gpu:1
 #SBATCH --mem=80G
@@ -21,7 +21,7 @@ cd /work/mherre/ticl
 mkdir -p logs runs models_diff
 
 GPU_ID="${GPU_ID:-0}"
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-100}"
 NUM_STEPS="${NUM_STEPS:-2048}"
 # BATCH_SIZE="${BATCH_SIZE:-8}"
 # AGGREGATE_K_GRADIENTS="${AGGREGATE_K_GRADIENTS:-1}"
@@ -40,7 +40,7 @@ DATA_SUBSET_FRACTION="${DATA_SUBSET_FRACTION:-1.0}"
 BOOTSTRAP="${BOOTSTRAP:-false}"
 GRANDE_DROPOUT="${GRANDE_DROPOUT:-0.0}"
 MISSING_VALUES="${MISSING_VALUES:-true}"
-GRANDE_COMPILE="${GRANDE_COMPILE:-true}"
+# GRANDE_COMPILE="${GRANDE_COMPILE:-true}"
 
 DIAGNOSTICS="${DIAGNOSTICS:-false}"
 GRANDE_DIAGNOSTICS_LEVEL="${GRANDE_DIAGNOSTICS_LEVEL:-scalars_small_hists}"
@@ -65,7 +65,7 @@ echo "  data_subset_fraction=${DATA_SUBSET_FRACTION}"
 echo "  bootstrap=${BOOTSTRAP}"
 echo "  grande_dropout=${GRANDE_DROPOUT}"
 echo "  missing_values=${MISSING_VALUES}"
-echo "  grande_compile=${GRANDE_COMPILE}"
+# echo "  grande_compile=${GRANDE_COMPILE}"
 echo "  diagnostics=${DIAGNOSTICS}"
 if [[ "${DIAGNOSTICS}" == "true" ]]; then
     echo "  grande_diagnostics_level=${GRANDE_DIAGNOSTICS_LEVEL}"
@@ -84,7 +84,7 @@ cmd=(
     --bootstrap "${BOOTSTRAP}"
     --grande-dropout "${GRANDE_DROPOUT}"
     --missing-values "${MISSING_VALUES}"
-    --grande-compile "${GRANDE_COMPILE}"
+    # --grande-compile "${GRANDE_COMPILE}"
     --epochs "${EPOCHS}"
     --num-steps "${NUM_STEPS}"
     # --batch-size "${BATCH_SIZE}"

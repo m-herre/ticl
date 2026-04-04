@@ -275,6 +275,12 @@ class ModelPredictor(nn.Module):
             h = self.tree_forward(x_test, I_logits, T, L, n_actual_features)
 
         elif self.child_model == "grande":
+            # Fix train/eval coordinate mismatch (Point 5): use stored
+            # random state when no explicit seed given, so
+            # features_by_estimator is deterministic during training
+            # just as it is at inference.
+            if grande_context_seed is None:
+                grande_context_seed = self.decoder.grande_random_state
             num_features_used = (
                 info.get("num_features_used", x.shape[-1]) if info is not None else x.shape[-1]
             )
